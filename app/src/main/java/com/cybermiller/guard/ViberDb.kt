@@ -124,7 +124,7 @@ object MiniSqlite {
             val all = ArrayList<List<Any?>>()
             walk(1, all, Int.MAX_VALUE)
             return all.mapNotNull { r ->
-                if (r.size >= 4 && r[0] == "table" && r[1] == name) r[3] as? Int else null
+                if (r.size >= 4 && r[0] == "table" && r[1] == name) (r[3] as? Long)?.toInt() else null
             }.firstOrNull()
         }
 
