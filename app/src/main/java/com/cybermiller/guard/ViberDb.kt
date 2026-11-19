@@ -138,21 +138,25 @@ object MiniSqlite {
             return buf
         }
 
+        /** SQLite page 1 begins with the 100-byte database header; b-tree fields start at offset 100 there. */
+        private const val PAGE1_HEADER = 100
+
         private fun walk(pageNo: Int, out: ArrayList<List<Any?>>, limit: Int) {
             if (pageNo < 1 || out.size >= limit) return
             val page = readPage(pageNo)
-            val kind = page[0].toInt() and 0xFF
+            val base = if (pageNo == 1) PAGE1_HEADER else 0
+            val kind = page[base].toInt() and 0xFF
             if (kind == 0x05) { // interior table b-tree
-                val cells = u16be(page, 3)
+                val cells = u16be(page, base + 3)
                 for (i in 0 until cells) {
-                    val ptr = u16be(page, 8 + i * 2)
-                    walk(u32be(page, ptr), out, limit)
+                    val child = u32be(page, base + 8 + i * 4)
+                    walk(child, out, limit)
                 }
-                walk(u32be(page, 8 + cells * 2), out, limit)
+                walk(u32be(page, base + 8 + cells * 4), out, limit)
             } else if (kind == 0x0D) { // leaf table b-tree
-                val cells = u16be(page, 3)
+                val cells = u16be(page, base + 3)
                 for (i in 0 until cells) {
-                    val ptr = u16be(page, 8 + i * 2)
+                    val ptr = u16be(page, base + 8 + i * 2)
                     val row = cell(page, ptr)
                     if (row != null && out.size < limit) out.add(row)
                 }
