@@ -1,38 +1,38 @@
 package com.cybermiller.guard
 
 import android.content.Context
-import android.content.res.AssetFileDescriptor
 import android.util.Log
 import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
 
 /**
- * Reads Viber conversation history straight out of the Viber app's own SQLite
- * database (`viber_messages` + `.db-wal`), replayed in-process without the
- * `sqlite3` binary (not present on this ROM). Requires root.
+ * Reads Viber conversation history out of Viber's own SQLite database.
  *
- * Read path:
- *   1. Root copies the live db+wal to our own external files dir
- *      (/sdcard/Android/data/com.cybermiller.guard/files/viber/) — retry until
- *      the copied sizes match the live sizes (atomic-ish snapshot).
- *   2. ViberDb.rebuild() replays the WAL into a consistent plain .db.
- *   3. MiniSqlite parses the table b-tree and returns rows.
+ * Arch: a Magisk `service.d` script (runs as root) copies
+ *   /data/data/com.viber.voip/databases/viber_messages + .db-wal
+ *   -> /sdcard/Android/data/com.cybermiller.guard/files/viber/snapshot.db(+wal)
+ *   every ~60 s.
+ * This app then reads that copy — no `su` needed from the app process (SELinux
+ * on this ROM blocks `su` from untrusted_app uid anyway).
  *
- * Media: `messages.destination_uri` is a `content://media/external/...` URI
- * which any app can open; fallback root-copies `/sdcard/Pictures/Viber/<FileName>`
- * from `msg_info` JSON.
+ * The copied pair is replayed with [ViberDb.rebuild] (WAL -> plain db) and
+ * parsed with [MiniSqlite] (no `sqlite3` binary on this ROM).
+ *
+ * Setup (one time, as root shell):
+ *   echo '#!/system/bin/sh
+ *   while true; do
+ *     cat /data/data/com.viber.voip/databases/viber_messages \
+ *       > /sdcard/Android/data/com.cybermiller.guard/files/viber/snapshot.db
+ *     cat /data/data/com.viber.voip/databases/viber_messages-wal \
+ *       > /sdcard/Android/data/com.cybermiller.guard/files/viber/snapshot.db-wal
+ *     chmod 666 /sdcard/Android/data/com.cybermiller.guard/files/viber/snapshot.db*
+ *     sleep 60
+ *   done' > /data/adb/service.d/99-viber-guard.sh
+ *   chmod 755 /data/adb/service.d/99-viber-guard.sh
+ *
+ * Then reboot (Magisk runs service.d at boot) or run the script manually.
  */
 object ViberReader {
     private const val TAG = "GuardViber"
-    private const val SRC_DB = "/data/data/com.viber.voip/databases/viber_messages"
-    private const val SRC_WAL = "/data/data/com.viber.voip/databases/viber_messages-wal"
-
-    private var ctxHolder: Context? = null
-    private lateinit var destDir: File
-    private lateinit var suBin: String
-
-    init {}
 
     /** One message row. */
     data class Msg(
@@ -49,83 +49,34 @@ object ViberReader {
     /** One conversation row. */
     data class Convo(val id: Long, val name: String, val kind: Int)
 
+    private var ctxHolder: Context? = null
+    private lateinit var destDir: File
     private var initialized = false
+
     fun init(ctx: Context) {
         if (initialized) return
         ctxHolder = ctx
         destDir = File(ctx.getExternalFilesDir(null), "viber").apply { mkdirs() }
-        suBin = findSu()
         initialized = true
-        Log.i(TAG, "ViberReader init; root available=${hasRoot()} su=$suBin dest=$destDir")
+        Log.i(TAG, "ViberReader init; dest=$destDir snapshotReady=$snapshotReady")
     }
 
-    fun available(): Boolean = hasRoot() && liveDbSize() > 0
-
-    /** Locates a working `su` binary (Magisk keeps it in /sbin, outside app PATH). */
-    private fun findSu(): String {
-        for (c in listOf("/sbin/su", "/system/bin/su", "/system/xbin/su", "su")) {
-            try {
-                val p = ProcessBuilder(c, "-c", "true").redirectErrorStream(true).start()
-                if (p.waitFor() == 0) return c
-            } catch (_: Throwable) {}
-        }
-        return "su"
-    }
-
-    fun hasRoot(): Boolean {
-        return try {
-            val p = ProcessBuilder(suBin, "-c", "true").redirectErrorStream(true).start()
-            p.waitFor() == 0
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private fun sh(cmd: String): String {
-        return try {
-            val p = ProcessBuilder(suBin, "-c", cmd).redirectErrorStream(true).start()
-            val out = p.inputStream.bufferedReader().readText()
-            p.waitFor()
-            out
-        } catch (t: Throwable) {
-            Log.w(TAG, "su failed: ${t.message}")
-            ""
-        }
-    }
-
-    /** Size of the live Viber db (0 if unreadable). */
-    private fun liveDbSize(): Long {
-        val out = sh("stat -c %s $SRC_DB 2>/dev/null")
-        return out.trim().toLongOrNull() ?: 0
-    }
-
-    /**
-     * Copies live db+wal to our external files dir, retrying until the copied
-     * sizes equal the live sizes (consistent snapshot). Returns the db file.
-     */
-    private fun snapshot(ctx: Context): File? {
+    /** True when a fresh root-copied snapshot exists (<= 2 min old). */
+    fun snapshotReady(): Boolean {
         val db = File(destDir, "snapshot.db")
-        val wal = File(destDir, "snapshot.db-wal")
-        val liveDb = liveDbSize()
-        val liveWal = sh("stat -c %s $SRC_WAL 2>/dev/null").trim().toLongOrNull() ?: 0
-        if (liveDb == 0L || liveWal == 0L) return null
-
-        for (i in 1..20) {
-            sh("cat $SRC_DB > ${db.path}")
-            sh("cat $SRC_WAL > ${wal.path}")
-            Thread.sleep(50)
-            if (db.length() == liveDb && wal.length() == liveWal) {
-                Log.i(TAG, "snapshot ok attempt $i: db=$liveDb wal=$liveWal")
-                return db
-            }
-        }
-        Log.w(TAG, "snapshot sizes never matched (db=$liveDb wal=$liveWal)")
-        return null
+        return db.exists() && db.length() > 2048 &&
+            System.currentTimeMillis() - db.lastModified() < 2 * 60 * 1000
     }
+
+    fun available(): Boolean = snapshotReady()
+
+    private fun dbFile() = File(destDir, "snapshot.db")
+    private fun walFile() = File(destDir, "snapshot.db-wal")
 
     /** Reads a conversation branch (conversations._id), oldest first, capped. */
     fun readMessages(ctx: Context, conversationId: Long, limit: Int = 200): List<Msg>? {
-        val db = snapshot(ctx) ?: return null
+        val db = dbFile(); val wal = walFile()
+        if (!db.exists() || db.length() < 2048) return null
         val rebuilt = ViberDb.rebuild(db) ?: return null
         MiniSqlite.Db(rebuilt.db).use { sqlite ->
             val rows = sqlite.table("messages", 50_000)
@@ -153,7 +104,8 @@ object ViberReader {
 
     /** All visible conversations (1:1 + groups). */
     fun readConversations(ctx: Context, limit: Int = 100): List<Convo>? {
-        val db = snapshot(ctx) ?: return null
+        val db = dbFile()
+        if (!db.exists() || db.length() < 2048) return null
         val rebuilt = ViberDb.rebuild(db) ?: return null
         MiniSqlite.Db(rebuilt.db).use { sqlite ->
             val rows = sqlite.table("conversations", 50_000)
@@ -175,7 +127,8 @@ object ViberReader {
 
     /** Resolve participant phone number from participants_info._id. */
     fun participantNumber(ctx: Context, participantInfoId: Long): String? {
-        val db = snapshot(ctx) ?: return null
+        val db = dbFile()
+        if (!db.exists()) return null
         val rebuilt = ViberDb.rebuild(db) ?: return null
         MiniSqlite.Db(rebuilt.db).use { sqlite ->
             val rows = sqlite.table("participants_info", 10_000)
@@ -191,7 +144,8 @@ object ViberReader {
     /** Copy attached media to our cache dir and return local File. */
     fun exportMedia(ctx: Context, mediaUri: String?, fileName: String?): File? {
         val dir = File(ctx.cacheDir, "viber_media").apply { mkdirs() }
-        val out = File(dir, "m_${System.currentTimeMillis()}_${fileName?.let { it.replace("[^a-zA-Z0-9.]".toRegex(), "_") } ?: "bin"}")
+        val out = File(dir, "m_${System.currentTimeMillis()}_${fileName?.let {
+            it.replace("[^a-zA-Z0-9.]".toRegex(), "_") } ?: "bin"}")
 
         // 1) MediaStore destination_uri — directly openable by our app
         mediaUri?.let { uri ->
@@ -202,21 +156,24 @@ object ViberReader {
                 if (out.length() > 0) {
                     Log.i(TAG, "media from content uri $uri")
                     return out
-                } else {
-                    out.delete()
-                }
+                } else { out.delete() }
             } catch (t: Throwable) {
                 Log.w(TAG, "content uri read failed: ${t.message}")
             }
         }
 
-        // 2) root-copy from /sdcard/Pictures/Viber/<fileName>
+        // 2) direct file read from /sdcard/Pictures/Viber/<fileName> (may fail perms)
         fileName?.let { name ->
             val src = "/sdcard/Pictures/Viber/$name"
-            sh("test -f $src && cat $src > ${out.path}")
-            if (out.length() > 0) {
-                Log.i(TAG, "media copied from $src")
-                return out
+            val f = File(src)
+            if (f.exists() && f.canRead()) {
+                f.inputStream().use { input ->
+                    out.outputStream().use { input.copyTo(it) }
+                }
+                if (out.length() > 0) {
+                    Log.i(TAG, "media copied from $src")
+                    return out
+                } else { out.delete() }
             }
         }
         out.delete()
