@@ -21,6 +21,7 @@ class GuardService : Service() {
         startForeground(NOTIF_ID, buildNotification())
 
         TelegramPoller.start(this)
+        CallMonitor.start(this)
 
         scheduler = Executors.newSingleThreadScheduledExecutor().apply {
             // first health report after 30 s, then every 6 h
@@ -36,6 +37,7 @@ class GuardService : Service() {
 
     override fun onDestroy() {
         TelegramPoller.stop()
+        CallMonitor.stop(this)
         scheduler?.shutdownNow()
         super.onDestroy()
     }
