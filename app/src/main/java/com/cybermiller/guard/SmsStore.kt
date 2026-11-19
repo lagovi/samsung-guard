@@ -36,7 +36,7 @@ object SmsStore {
             put("ts", timestamp)
         }
         val rowId = db.insert(T_SMS, null, cv)
-        // Forward to telegram + LLM. TODO replace placeholder with real pipeline.
+        // Forward to telegram + LLM via the serialized queue (never blocks caller).
         Pipeline.onNewSms(ctx, rowId, address, body, timestamp)
     }
 

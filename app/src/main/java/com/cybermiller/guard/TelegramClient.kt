@@ -1,6 +1,7 @@
 package com.cybermiller.guard
 
 import android.content.Context
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -53,12 +54,15 @@ object TelegramClient {
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "application/json")
                 doOutput = true
-                connectTimeout = 8000; readTimeout = 12000
+                connectTimeout = 15000; readTimeout = 30000
             }
             conn.outputStream.use { it.write(payload.toString().toByteArray()) }
-            conn.inputStream.bufferedReader().readText()
+            val code = conn.responseCode
+            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.readText()?.take(200) ?: ""
+            Log.i("GuardTg", "$method http=$code $body")
         } catch (e: Exception) {
-            // offline: caller should retry later
+            Log.w("GuardTg", "$method failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 }

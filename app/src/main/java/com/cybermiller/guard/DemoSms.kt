@@ -16,10 +16,8 @@ object DemoSms {
     )
 
     fun send(ctx: Context) {
-        val appCtx = ctx.applicationContext
         val d = samples[Random().nextInt(samples.size)]
-        Thread {
-            SmsStore.onSmsReceived(appCtx, d.address, d.body, System.currentTimeMillis())
-        }.start()
+        // Pipeline is already serialized on its own thread; DB insert is cheap.
+        SmsStore.onSmsReceived(ctx.applicationContext, d.address, d.body, System.currentTimeMillis())
     }
 }

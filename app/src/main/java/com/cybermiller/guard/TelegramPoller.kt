@@ -1,6 +1,7 @@
 package com.cybermiller.guard
 
 import android.content.Context
+import android.util.Log
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -12,18 +13,21 @@ import java.net.URL
 object TelegramPoller {
     private const val TOKEN = "REDACTED-ROTATED-TOKEN"
     private const val CHAT = "000000000"
+    private const val TAG = "GuardPoller"
     @Volatile private var running = false
     private var offset = 0L
 
     fun start(ctx: Context) {
         if (running) return
         running = true
+        Log.i(TAG, "poller start")
         Thread {
             val appCtx = ctx.applicationContext
             while (running) {
                 try {
                     pollOnce(appCtx)
                 } catch (e: Exception) {
+                    Log.w(TAG, "poll failed: ${e.javaClass.simpleName}: ${e.message}")
                     Thread.sleep(3000)
                 }
             }
@@ -38,7 +42,9 @@ object TelegramPoller {
             connectTimeout = 10000; readTimeout = 60000
         }
         val resp = conn.inputStream.bufferedReader().readText()
+        Log.i(TAG, "poll http=${conn.responseCode} offset=$offset")
         val arr = JSONObject(resp).optJSONArray("result") ?: return
+        Log.i(TAG, "poll got ${arr.length()} updates")
         for (i in 0 until arr.length()) {
             val upd = arr.getJSONObject(i)
             offset = upd.optLong("update_id", offset) + 1

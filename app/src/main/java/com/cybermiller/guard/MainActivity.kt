@@ -32,7 +32,7 @@ class MainActivity : AppCompatActivity() {
             statusText.text = getString(R.string.status_stopped)
         }
         demoBtn.setOnClickListener {
-            DemoSms.send(this)
+            Thread { DemoSms.send(this) }.start()
         }
 
         statusText.text = getString(R.string.status_stopped)
