@@ -161,24 +161,24 @@ object MiniSqlite {
 
         private fun cell(page: ByteArray, ptr: Int): List<Any?>? {
             var p = ptr
-            readVarint(page, p)          // payload size (unused)
-            p = readVarint(page, p).second
-            readVarint(page, p)          // rowid (unused)
-            p = readVarint(page, p).second
-            val recLen = readVarint(page, p).first
-            p = readVarint(page, p).second
+            val (payloadSize, p2) = readVarint(page, p)   // payload length = record length
+            p = p2
+            val (rowid, p2) = readVarint(page, p)         // rowid
+            p = p2
+            val recLen = payloadSize.toInt()
             if (recLen <= 0 || recLen > 1_000_000 || p + recLen > page.size) return null
-            val rec = ByteArray(recLen.toInt())
-            page.copyInto(rec, 0, p, p + recLen.toInt())
+            val rec = ByteArray(recLen)
+            page.copyInto(rec, 0, p, p + recLen)
 
-            // Record header: [header_size_varint][serial_type_1][serial_type_2]...[data...]
+            // Record: [header_size_varint][serial_type_1]...[serial_type_N][data_1]...
+            // header_size_varint counts itself.
             val (headerSize, serialPos0) = readVarint(rec, 0)
             var serialPos = serialPos0.toInt()
-            var dataPos = headerSize.toInt()
-            val hdrEnd = headerSize.toInt()
+            val hdrEnd = (headerSize.coerceAtMost(rec.size)).toInt()
+            var dataPos = hdrEnd
 
             val out = ArrayList<Any?>(32)
-            while (serialPos < hdrEnd && dataPos <= rec.size) {
+            while (serialPos < hdrEnd && serialPos < rec.size) {
                 val t = rec[serialPos].toInt() and 0xFF
                 serialPos++
                 val serial = serialType(t)
