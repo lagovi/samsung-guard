@@ -142,9 +142,6 @@ object MiniSqlite {
             return buf
         }
 
-        /** SQLite page 1 begins with the 100-byte database header; b-tree fields start at offset 100 there. */
-        private const val PAGE1_HEADER = 100
-
         private fun walk(pageNo: Int, out: ArrayList<List<Any?>>, limit: Int) {
             if (pageNo < 1 || out.size >= limit) return
             val page = readPage(pageNo)
