@@ -96,7 +96,7 @@ object MiniSqlite {
         val headerOk: Boolean
 
         init {
-            val hdr = ByteArray(16)
+            val hdr = ByteArray(100) // header needs >=18 bytes for page size at offset 16-17
             raf.seek(0L)
             raf.readFully(hdr)
             headerOk = String(hdr, 0, 15).startsWith("SQLite format 3")
