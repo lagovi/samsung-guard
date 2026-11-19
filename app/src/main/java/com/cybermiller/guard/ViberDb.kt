@@ -126,7 +126,7 @@ object MiniSqlite {
             val found = all.mapNotNull { r ->
                 if (r.size >= 4 && r[0] == "table" && r[1] == name) (r[3] as? Long)?.toInt() else null
             }.firstOrNull()
-            Log.i(TAG, "rootPage($name) -> $found (scanned ${all.size} sqlite_master rows)")
+            Log.i("GuardViberDb", "rootPage($name) -> $found (scanned ${all.size} sqlite_master rows)")
             return found
         }
 
