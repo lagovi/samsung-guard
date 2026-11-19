@@ -58,7 +58,7 @@ object ViberReader {
         ctxHolder = ctx
         destDir = File(ctx.getExternalFilesDir(null), "viber").apply { mkdirs() }
         initialized = true
-        Log.i(TAG, "ViberReader init; dest=$destDir snapshotReady=$snapshotReady")
+        Log.i(TAG, "ViberReader init; dest=$destDir snapshotReady=${snapshotReady()}")
     }
 
     /** True when a fresh root-copied snapshot exists (<= 2 min old). */

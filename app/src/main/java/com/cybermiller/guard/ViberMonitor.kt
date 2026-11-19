@@ -45,7 +45,7 @@ object ViberMonitor {
     fun stop() { running = false }
 
     private fun tick(ctx: Context) {
-        if (!ViberReader.hasRoot()) return
+        if (!ViberReader.snapshotReady()) return
         // conversation id on this device = 1 (the chat with +375000000000)
         ViberReader.readConversations(ctx).orEmpty().firstOrNull { c -> c.id == 1L }
             ?.let { convo ->
