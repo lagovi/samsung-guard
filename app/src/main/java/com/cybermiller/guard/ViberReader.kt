@@ -116,7 +116,7 @@ object ViberReader {
                 out.add(Convo(
                     id = r[0] as? Long ?: 0L,
                     name = r.getOrNull(11) as? String ?: "",
-                    kind = r.getOrNull(1) as? Long ?: 0,
+                    kind = (r.getOrNull(1) as? Long ?: 0L).toInt(),
                 ))
                 if (out.size >= limit) break
             }
