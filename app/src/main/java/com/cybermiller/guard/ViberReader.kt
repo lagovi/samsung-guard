@@ -113,7 +113,7 @@ object ViberReader {
             val out = ArrayList<Convo>(rows.size)
             for (r in rows) {
                 if (r.isEmpty()) continue                               // need at least _id
-                Log.i(TAG, "  master row: type=${r.getOrNull(0)} name=${r.getOrNull(1)} rootpage=${r.getOrNull(3)}")
+                Log.i(TAG, "  master row len=${r.size}: ${r.joinToString(",") { it.toString() }}")
                 if (r.size > 10 && r[10] as? Long ?: 0L == 1L) continue // deleted
                 out.add(Convo(
                     id = r[0] as? Long ?: 0L,
