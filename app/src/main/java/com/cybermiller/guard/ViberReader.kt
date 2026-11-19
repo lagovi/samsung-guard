@@ -30,6 +30,7 @@ object ViberReader {
 
     private var ctxHolder: Context? = null
     private lateinit var destDir: File
+    private lateinit var suBin: String
 
     init {}
 
