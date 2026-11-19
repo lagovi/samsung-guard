@@ -111,12 +111,12 @@ object ViberReader {
             val rows = sqlite.table("conversations", 50_000)
             val out = ArrayList<Convo>(rows.size)
             for (r in rows) {
-                if (r.size < 12) continue
+                if (r.isEmpty()) continue                               // need at least _id
                 if (r.size > 10 && r[10] as? Long ?: 0L == 1L) continue // deleted
                 out.add(Convo(
                     id = r[0] as? Long ?: 0L,
                     name = r.getOrNull(11) as? String ?: "",
-                    kind = (r.getOrNull(1) as? Long ?: 0L).toInt(),
+                    kind = r.getOrNull(1) as? Long ?: 0,
                 ))
                 if (out.size >= limit) break
             }
