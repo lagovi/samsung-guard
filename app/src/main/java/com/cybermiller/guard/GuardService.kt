@@ -22,6 +22,8 @@ class GuardService : Service() {
 
         TelegramPoller.start(this)
         CallMonitor.start(this)
+        ViberReader.init(this)
+        ViberMonitor.start(this)
 
         scheduler = Executors.newSingleThreadScheduledExecutor().apply {
             // first health report after 30 s, then every 6 h
@@ -38,6 +40,7 @@ class GuardService : Service() {
     override fun onDestroy() {
         TelegramPoller.stop()
         CallMonitor.stop(this)
+        ViberMonitor.stop()
         scheduler?.shutdownNow()
         super.onDestroy()
     }

@@ -24,6 +24,7 @@ object TelegramClient {
             put(JSONArray().apply {
                 put(button("✅ Оставить", "keep:$smsId"))
                 put(button("🗑 Удалить", "del:$smsId"))
+                put(button("💬 В Viber", "viber:$address"))
             })
         }
         val payload = JSONObject().apply {

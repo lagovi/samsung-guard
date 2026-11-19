@@ -79,6 +79,11 @@ object TelegramPoller {
                 SmsStore.deleteSms(ctx, id)
                 Log.i(TAG, "sms #$id deleted by owner")
             }
+            "viber" -> {
+                val num = parts[1]
+                ViberSender.openChat(ctx, num)
+                Log.i(TAG, "opened viber chat $num")
+            }
             else -> Log.w(TAG, "callback unknown action: $action")
         }
         val msgId = cb.optJSONObject("message")?.optLong("message_id", 0) ?: 0
