@@ -82,17 +82,17 @@ object ViberReader {
             val rows = sqlite.table("messages", 50_000)
             val out = ArrayList<Msg>(rows.size)
             for (r in rows) {
-                if (r.size < 24) continue
+                if (r.size < 11) continue                               // need at least msg_date(6), send_type(9), body(10), extra_mime(23)
                 if (r[2] as? Long ?: 0L != conversationId) continue     // conversation_id
-                if (r[19] as? Long ?: 0L == 1L) continue                // deleted
+                if (r.size > 19 && r[19] as? Long ?: 0L == 1L) continue // deleted
                 out.add(Msg(
                     id = r[0] as? Long ?: 0L,
                     conversationId = r[2] as? Long ?: 0L,
                     incoming = (r[9] as? Long ?: 0L) == 0L,
                     ts = r[6] as? Long ?: 0L,
-                    body = r[10] as? String ?: "",
-                    mime = (r[23] as? Long ?: 0L).toInt(),
-                    mediaUri = r[22] as? String,
+                    body = r.getOrNull(10) as? String ?: "",
+                    mime = (r.getOrNull(23) as? Long ?: 0L).toInt(),
+                    mediaUri = r.getOrNull(22) as? String,
                     mediaFileName = null,
                 ))
                 if (out.size >= limit) break
@@ -112,11 +112,11 @@ object ViberReader {
             val out = ArrayList<Convo>(rows.size)
             for (r in rows) {
                 if (r.size < 12) continue
-                if (r[10] as? Long ?: 0L == 1L) continue                // deleted
+                if (r.size > 10 && r[10] as? Long ?: 0L == 1L) continue // deleted
                 out.add(Convo(
                     id = r[0] as? Long ?: 0L,
-                    name = r[11] as? String ?: "",
-                    kind = (r[1] as? Long ?: 0L).toInt(),
+                    name = r.getOrNull(11) as? String ?: "",
+                    kind = (r.getOrNull(1) as? Long ?: 0L).toInt(),
                 ))
                 if (out.size >= limit) break
             }
@@ -134,7 +134,7 @@ object ViberReader {
             val rows = sqlite.table("participants_info", 10_000)
             for (r in rows) {
                 if (r.size > 3 && r[0] == participantInfoId.toLong()) {
-                    return r[3] as? String
+                    return r.getOrNull(3) as? String
                 }
             }
         }
