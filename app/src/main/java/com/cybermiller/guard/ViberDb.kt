@@ -169,10 +169,10 @@ object MiniSqlite {
 
         private fun cell(page: ByteArray, ptr: Int): List<Any?>? {
             var p = ptr
-            val (payloadSize, p2) = readVarint(page, p)   // payload length = record length
-            p = p2
-            val (rowid, p3) = readVarint(page, p)         // rowid
-            p = p3
+            val payloadSize = readVarint(page, p).first   // payload length = record length
+            p = readVarint(page, p).second
+            val rowid = readVarint(page, p).first         // rowid (= _id for INTEGER PRIMARY KEY)
+            p = readVarint(page, p).second
             val recLen = payloadSize.toInt()
             if (recLen <= 0 || recLen > 1_000_000 || p + recLen > page.size) return null
             val rec = ByteArray(recLen)
@@ -185,7 +185,8 @@ object MiniSqlite {
             val hdrEnd = (headerSize.coerceAtMost(rec.size.toLong())).toInt()
             var dataPos = hdrEnd
 
-            val out = ArrayList<Any?>(32)
+            val out = ArrayList<Any?>(33)
+            out.add(rowid) // _id = rowid (INTEGER PRIMARY KEY is not stored in record body)
             while (serialPos < hdrEnd && serialPos < rec.size) {
                 val t = rec[serialPos].toInt() and 0xFF
                 serialPos++
