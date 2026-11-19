@@ -85,12 +85,7 @@ object ViberDb {
  */
 object MiniSqlite {
 
-    private const val TYPE_TEXT = 0   // tag category: blob/text
-    private const val TYPE_INT = 1
-    private const val TYPE_FLOAT = 2
-    private const val TYPE_NULL = 5
-
-        class Db(dbFile: File) : AutoCloseable {
+    class Db(dbFile: File) : AutoCloseable {
         private val raf = RandomAccessFile(dbFile, "r")
         val pageSize: Int
         val headerOk: Boolean
@@ -194,34 +189,31 @@ object MiniSqlite {
             while (serialPos < hdrEnd && serialPos < rec.size) {
                 val t = rec[serialPos].toInt() and 0xFF
                 serialPos++
-                val serial = serialType(t)
-                if (serial.len == 0 && serial.tag == TYPE_NULL) {
+                // NULL serial types: 0, 10, 11 (reserved)
+                if (t == 0 || t == 10 || t == 11) {
                     out.add(null); continue
                 }
-                if (dataPos + serial.len > rec.size) break
-                out.add(valFor(t, rec, dataPos, serial.len))
-                dataPos += serial.len
+                // Constant integers: 8 → 0, 9 → 1 (zero data bytes)
+                if (t == 8) { out.add(0L); continue }
+                if (t == 9) { out.add(1L); continue }
+                val len = serialLen(t)
+                if (dataPos + len > rec.size) break
+                out.add(valFor(t, rec, dataPos, len))
+                dataPos += len
             }
             return out
         }
 
-        private data class Serial(val tag: Int, val len: Int)
-
-        private fun serialType(t: Int): Serial = when {
-            t == 0 -> Serial(TYPE_NULL, 0)
-            t in 1..6 -> Serial(TYPE_INT, when (t) { 1 -> 1; 2 -> 2; 3 -> 3; 4 -> 4; 5 -> 6; else -> 8 })
-            t == 7 -> Serial(TYPE_FLOAT, 8)
-            t == 8 -> Serial(TYPE_INT, 0)
-            t == 9 -> Serial(TYPE_INT, 0)
-            t in 10..11 -> Serial(TYPE_NULL, 0)
-            else -> Serial(0, if (t % 2 == 0) (t - 12) / 2 else (t - 13) / 2)
+        /** Returns data length (bytes) for a SQLite serial type, or -1 if the type carries no data. */
+        private fun serialLen(t: Int): Int = when {
+            t in 1..6 -> when (t) { 1 -> 1; 2 -> 2; 3 -> 3; 4 -> 4; 5 -> 6; else -> 8 }
+            t == 7 -> 8
+            t >= 12 -> if (t % 2 == 0) (t - 12) / 2 else (t - 13) / 2
+            else -> -1
         }
 
         private fun valFor(t: Int, b: ByteArray, off: Int, len: Int): Any? {
             return when {
-                t == 8 -> 0L
-                t == 9 -> 1L
-                t in 10..11 -> null
                 t == 7 -> {
                     var bits = 0L
                     for (i in 0 until 8) bits = (bits shl 8) or (b[off + i].toInt() and 0xFF).toLong()
@@ -233,7 +225,7 @@ object MiniSqlite {
                     if (len < 8 && b[off].toInt() < 0) v = v or (0xFFL shl (len * 8))
                     v
                 }
-                else -> String(b, off, len)
+                else -> String(b, off, len)   // BLOB / TEXT (12+)
             }
         }
 
