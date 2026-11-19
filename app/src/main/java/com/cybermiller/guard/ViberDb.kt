@@ -90,10 +90,11 @@ object MiniSqlite {
     private const val TYPE_FLOAT = 2
     private const val TYPE_NULL = 5
 
-    class Db(dbFile: File) : AutoCloseable {
+        class Db(dbFile: File) : AutoCloseable {
         private val raf = RandomAccessFile(dbFile, "r")
         val pageSize: Int
         val headerOk: Boolean
+        val pageCount: Int
         companion object {
             /** SQLite page 1 begins with the 100-byte database header; b-tree fields start at offset 100 there. */
             const val PAGE1_HEADER = 100
@@ -106,6 +107,7 @@ object MiniSqlite {
             headerOk = String(hdr, 0, 15).startsWith("SQLite format 3")
             val size = u16be(hdr, 16)
             pageSize = if (size == 1) 65536 else size
+            pageCount = (raf.length() / pageSize).toInt()
         }
 
         /** Returns rows of table `name` as lists of SQLite values (String/Long/Double/null). */
@@ -145,15 +147,17 @@ object MiniSqlite {
         private fun walk(pageNo: Int, out: ArrayList<List<Any?>>, limit: Int) {
             if (pageNo < 1 || out.size >= limit) return
             val page = readPage(pageNo)
+            if (pageNo < 1 || pageNo > pageCount) return
             val base = if (pageNo == 1) Db.PAGE1_HEADER else 0
             val kind = page[base].toInt() and 0xFF
             if (kind == 0x05) { // interior table b-tree
                 val cells = u16be(page, base + 3)
                 for (i in 0 until cells) {
                     val child = u32be(page, base + 8 + i * 4)
-                    walk(child, out, limit)
+                    if (child >= 1 && child <= pageCount) walk(child, out, limit)
                 }
-                walk(u32be(page, base + 8 + cells * 4), out, limit)
+                val right = u32be(page, base + 8 + cells * 4)
+                if (right >= 1 && right <= pageCount) walk(right, out, limit)
             } else if (kind == 0x0D) { // leaf table b-tree
                 val cells = u16be(page, base + 3)
                 for (i in 0 until cells) {
