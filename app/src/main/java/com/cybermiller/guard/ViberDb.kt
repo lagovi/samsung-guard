@@ -163,8 +163,8 @@ object MiniSqlite {
             var p = ptr
             val (payloadSize, p2) = readVarint(page, p)   // payload length = record length
             p = p2
-            val (rowid, p2) = readVarint(page, p)         // rowid
-            p = p2
+            val (rowid, p3) = readVarint(page, p)         // rowid
+            p = p3
             val recLen = payloadSize.toInt()
             if (recLen <= 0 || recLen > 1_000_000 || p + recLen > page.size) return null
             val rec = ByteArray(recLen)
@@ -174,7 +174,7 @@ object MiniSqlite {
             // header_size_varint counts itself.
             val (headerSize, serialPos0) = readVarint(rec, 0)
             var serialPos = serialPos0.toInt()
-            val hdrEnd = (headerSize.coerceAtMost(rec.size)).toInt()
+            val hdrEnd = (headerSize.coerceAtMost(rec.size.toLong())).toInt()
             var dataPos = hdrEnd
 
             val out = ArrayList<Any?>(32)
