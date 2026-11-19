@@ -109,9 +109,11 @@ object ViberReader {
         val rebuilt = ViberDb.rebuild(db) ?: return null
         MiniSqlite.Db(rebuilt.db).use { sqlite ->
             val rows = sqlite.table("conversations", 50_000)
+            Log.i(TAG, "readConversations: walked ${rows.size} rows from sqlite_master")
             val out = ArrayList<Convo>(rows.size)
             for (r in rows) {
                 if (r.isEmpty()) continue                               // need at least _id
+                Log.i(TAG, "  master row: type=${r.getOrNull(0)} name=${r.getOrNull(1)} rootpage=${r.getOrNull(3)}")
                 if (r.size > 10 && r[10] as? Long ?: 0L == 1L) continue // deleted
                 out.add(Convo(
                     id = r[0] as? Long ?: 0L,

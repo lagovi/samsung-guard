@@ -153,10 +153,12 @@ object MiniSqlite {
             if (kind == 0x05) { // interior table b-tree
                 val cells = u16be(page, base + 3)
                 for (i in 0 until cells) {
-                    val child = u32be(page, base + 8 + i * 4)
+                    val cellPtrOff = base + 8 + i * 2
+                    val cellContentOff = u16be(page, cellPtrOff)
+                    val child = u32be(page, cellContentOff)
                     if (child >= 1 && child <= pageCount) walk(child, out, limit)
                 }
-                val right = u32be(page, base + 8 + cells * 4)
+                val right = u32be(page, base + 8 + cells * 2)
                 if (right >= 1 && right <= pageCount) walk(right, out, limit)
             } else if (kind == 0x0D) { // leaf table b-tree
                 val cells = u16be(page, base + 3)
