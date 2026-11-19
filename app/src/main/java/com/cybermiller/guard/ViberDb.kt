@@ -94,6 +94,10 @@ object MiniSqlite {
         private val raf = RandomAccessFile(dbFile, "r")
         val pageSize: Int
         val headerOk: Boolean
+        companion object {
+            /** SQLite page 1 begins with the 100-byte database header; b-tree fields start at offset 100 there. */
+            const val PAGE1_HEADER = 100
+        }
 
         init {
             val hdr = ByteArray(100) // header needs >=18 bytes for page size at offset 16-17
@@ -144,7 +148,7 @@ object MiniSqlite {
         private fun walk(pageNo: Int, out: ArrayList<List<Any?>>, limit: Int) {
             if (pageNo < 1 || out.size >= limit) return
             val page = readPage(pageNo)
-            val base = if (pageNo == 1) PAGE1_HEADER else 0
+            val base = if (pageNo == 1) Db.PAGE1_HEADER else 0
             val kind = page[base].toInt() and 0xFF
             if (kind == 0x05) { // interior table b-tree
                 val cells = u16be(page, base + 3)
