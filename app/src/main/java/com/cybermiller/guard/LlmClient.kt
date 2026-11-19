@@ -56,8 +56,17 @@ object LlmClient {
                 return Verdict("keep", "HTTP $code: ${resp.take(120)}", "low")
             }
             val json = JSONObject(resp)
-            val content = json.getJSONArray("choices").getJSONObject(0)
-                .getJSONObject("message").getString("content")
+            val choices = json.optJSONArray("choices")
+            if (choices == null || choices.length() == 0) {
+                Log.w(TAG, "LLM returned no choices: ${resp.take(300)}")
+                return Verdict("keep", "LLM empty response", "low")
+            }
+            val content = choices.getJSONObject(0)
+                .getJSONObject("message").optString("content", "")
+            if (content.isBlank()) {
+                Log.w(TAG, "LLM content empty: ${resp.take(300)}")
+                return Verdict("keep", "LLM empty content", "low")
+            }
             val v = JSONObject(extractJson(content))
             val rawVerdict = v.optString("verdict", "keep").lowercase().trim()
             // normalize model's vocabulary to our three buckets
@@ -79,7 +88,9 @@ object LlmClient {
         }
     }
 
-    /** Strips markdown code fences / prose and returns the first JSON object substring. */
+    /**
+     * Strips markdown code fences / prose and returns the first JSON object substring.
+     */
     private fun extractJson(s: String): String {
         val start = s.indexOf('{')
         val end = s.lastIndexOf('}')

@@ -58,13 +58,28 @@ object TelegramPoller {
 
     private fun handleCallback(ctx: Context, cb: JSONObject) {
         val data = cb.optString("data", "")
+        Log.i(TAG, "callback data=$data")
         val parts = data.split(":")
-        if (parts.size != 2) return
+        if (parts.size != 2) {
+            Log.w(TAG, "callback bad data: $data")
+            return
+        }
         val action = parts[0]
-        val id = parts[1].toLongOrNull() ?: return
+        val id = parts[1].toLongOrNull()
+        if (id == null) {
+            Log.w(TAG, "callback bad id: $data")
+            return
+        }
         when (action) {
-            "keep" -> SmsStore.markHandled(ctx, id, "kept", "owner kept")
-            "del" -> SmsStore.deleteSms(ctx, id)
+            "keep" -> {
+                SmsStore.markHandled(ctx, id, "kept", "owner kept")
+                Log.i(TAG, "sms #$id kept by owner")
+            }
+            "del" -> {
+                SmsStore.deleteSms(ctx, id)
+                Log.i(TAG, "sms #$id deleted by owner")
+            }
+            else -> Log.w(TAG, "callback unknown action: $action")
         }
         val msgId = cb.optJSONObject("message")?.optLong("message_id", 0) ?: 0
         answerCallback(cb.optString("id"), if (action == "del") "Удалено" else "Оставлено")
@@ -90,10 +105,14 @@ object TelegramPoller {
         try {
             val conn = (URL("https://api.telegram.org/bot$TOKEN/$method").openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"; setRequestProperty("Content-Type", "application/json")
-                doOutput = true; connectTimeout = 8000; readTimeout = 12000
+                doOutput = true; connectTimeout = 8000; readTimeout = 15000
             }
             conn.outputStream.use { it.write(payload.toString().toByteArray()) }
-            conn.inputStream.bufferedReader().readText()
-        } catch (_: Exception) {}
+            val code = conn.responseCode
+            val body = conn.inputStream.bufferedReader().readText().take(150)
+            Log.i(TAG, "$method http=$code $body")
+        } catch (e: Exception) {
+            Log.w(TAG, "$method failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 }
