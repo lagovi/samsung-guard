@@ -161,9 +161,9 @@ object MiniSqlite {
 
         private fun cell(page: ByteArray, ptr: Int): List<Any?>? {
             var p = ptr
-            val payloadSize = readVarint(page, p).first
+            readVarint(page, p)          // payload size (unused)
             p = readVarint(page, p).second
-            val rowid = readVarint(page, p).first
+            readVarint(page, p)          // rowid (unused)
             p = readVarint(page, p).second
             val recLen = readVarint(page, p).first
             p = readVarint(page, p).second
@@ -171,20 +171,23 @@ object MiniSqlite {
             val rec = ByteArray(recLen.toInt())
             page.copyInto(rec, 0, p, p + recLen.toInt())
 
+            // Record header: [header_size_varint][serial_type_1][serial_type_2]...[data...]
+            val (headerSize, serialPos0) = readVarint(rec, 0)
+            var serialPos = serialPos0.toInt()
+            var dataPos = headerSize.toInt()
+            val hdrEnd = headerSize.toInt()
+
             val out = ArrayList<Any?>(32)
-            var off = 0
-            while (off < rec.size) {
-                val (hdrLen, next) = readVarint(rec, off)
-                val serialStart = next
-                if (serialStart >= rec.size) break
-                val t = rec[serialStart].toInt() and 0xFF
+            while (serialPos < hdrEnd && dataPos <= rec.size) {
+                val t = rec[serialPos].toInt() and 0xFF
+                serialPos++
                 val serial = serialType(t)
                 if (serial.len == 0 && serial.tag == TYPE_NULL) {
-                    out.add(null); off = serialStart + 1; continue
+                    out.add(null); continue
                 }
-                off = serialStart + serial.len
-                if (off > rec.size) break
-                out.add(valFor(t, rec, serialStart, serial.len))
+                if (dataPos + serial.len > rec.size) break
+                out.add(valFor(t, rec, dataPos, serial.len))
+                dataPos += serial.len
             }
             return out
         }
@@ -207,7 +210,7 @@ object MiniSqlite {
                 t == 9 -> 1L
                 t in 10..11 -> null
                 t == 7 -> {
-                    var bits: Long = 0L
+                    var bits = 0L
                     for (i in 0 until 8) bits = (bits shl 8) or (b[off + i].toInt() and 0xFF).toLong()
                     java.lang.Double.longBitsToDouble(bits)
                 }
