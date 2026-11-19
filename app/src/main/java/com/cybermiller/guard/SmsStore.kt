@@ -36,9 +36,24 @@ object SmsStore {
             put("ts", timestamp)
         }
         val rowId = db.insert(T_SMS, null, cv)
-        // Forward to telegram + LLM via the serialized queue (never blocks caller).
+        // Durable handoff: JobScheduler outlives the 30 s goAsync() window
+        // that SmsReceiver has. Heavy LLM call happens inside the job.
         Pipeline.onNewSms(ctx, rowId, address, body, timestamp)
     }
+
+    fun get(ctx: Context, id: Long): Row? {
+        h(ctx).readableDatabase.query(
+            T_SMS, null, "id=?", arrayOf(id.toString()), null, null, null
+        ).use { c ->
+            if (!c.moveToFirst()) return null
+            return Row(
+                address = c.getString(c.getColumnIndexOrThrow("address")),
+                body = c.getString(c.getColumnIndexOrThrow("body")),
+            )
+        }
+    }
+
+    data class Row(val address: String, val body: String)
 
     fun markHandled(ctx: Context, id: Long, verdict: String, reply: String) {
         val db = h(ctx).writableDatabase

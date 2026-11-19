@@ -36,12 +36,17 @@ object HealthMonitor {
         // RAM
         try {
             val mi = File("/proc/meminfo").readLines()
-            fun kb(key: String) = mi.firstOrNull { it.startsWith(key) }
-                ?.replace(Regex("[^0-9]"), "")?.toLongOrNull() ?: 0L
+            fun kb(key: String) = mi.firstOrNull { it.startsWith(key + ":") }
+                ?.substringAfter(":")?.replace(Regex("[^0-9]"), "")?.toLongOrNull() ?: 0L
             val total = kb("MemTotal")
             val avail = kb("MemAvailable")
-            if (total > 0) {
-                val freeMb = avail / 1024
+            var free = avail
+            if (free <= 0) {
+                // older kernels lack MemAvailable; approximate with MemFree + Buffers + Cached
+                free = kb("MemFree") + kb("Buffers") + kb("Cached")
+            }
+            if (total > 0 && free > 0) {
+                val freeMb = free / 1024
                 val totalMb = total / 1024
                 sb.append("🧠 RAM: $freeMb/$totalMb MB free\n")
             }
