@@ -123,9 +123,11 @@ object MiniSqlite {
         private fun rootPage(name: String): Int? {
             val all = ArrayList<List<Any?>>()
             walk(1, all, Int.MAX_VALUE)
-            return all.mapNotNull { r ->
+            val found = all.mapNotNull { r ->
                 if (r.size >= 4 && r[0] == "table" && r[1] == name) (r[3] as? Long)?.toInt() else null
             }.firstOrNull()
+            Log.i(TAG, "rootPage($name) -> $found (scanned ${all.size} sqlite_master rows)")
+            return found
         }
 
         private fun u16be(b: ByteArray, off: Int): Int =
