@@ -62,13 +62,13 @@ object ViberMonitor {
                 msgs.filter { it.ts > lastTs }
                     .sortedBy { it.ts }
                     .forEach { m ->
-                        forward(ctx, m)
+                        forward(ctx, convo.id, m)
                         lastTs = maxOf(lastTs, m.ts)
                     }
             }
     }
 
-    private fun forward(ctx: Context, m: ViberReader.Msg) {
+    private fun forward(ctx: Context, conversationId: Long, m: ViberReader.Msg) {
         val dir = if (m.incoming) "⬅️" else "➡️"
         val time = sdf.format(Date(m.ts))
         val num = (if (m.participantId != 0L) ViberReader.participantNumber(ctx, m.participantId) else null)

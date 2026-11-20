@@ -60,8 +60,6 @@ object TelegramPoller {
             val chatId = upd.optJSONObject("message")?.optJSONObject("chat")?.optLong("id")
                 ?: upd.optJSONObject("callback_query")?.optJSONObject("message")?.optJSONObject("chat")?.optLong("id")
             if (chatId != CHAT.toLong()) continue
-            val cb = upd.optJSONObject("callback_query") ?: continue
-            handleCallback(ctx, cb)
             val cb = upd.optJSONObject("callback_query")
             if (cb != null) {
                 handleCallback(ctx, cb)
@@ -82,9 +80,9 @@ object TelegramPoller {
         if (text.isBlank()) return
         try {
             ViberSender.sendReply(ctx, phone, text)
-            sendText("✅ Ответ отправлен в Viber ($phone):\n<i>${text.take(400)}</i>")
+            TelegramClient.sendText("✅ Ответ отправлен в Viber ($phone):\n<i>${text.take(400)}</i>")
         } catch (e: Throwable) {
-            sendText("❌ Не удалось отправить ответ в Viber: ${e.message}")
+            TelegramClient.sendText("❌ Не удалось отправить ответ в Viber: ${e.message}")
             Log.w(TAG, "sendReply failed", e)
         }
     }
