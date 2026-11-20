@@ -83,7 +83,7 @@ object ViberMonitor {
         }.trim()
 
         if (isMedia) {
-            val file = ViberReader.exportMedia(ctx, m.mediaUri, null)
+            val file = ViberReader.exportMedia(ctx, m.mediaUri, m.mediaFileName, m.mediaSize)
             if (file != null) {
                 TelegramClient.sendFile(file, caption)
                 Log.i(TAG, "forwarded viber media #${m.id} mime=${m.mime} -> ${file.name}")

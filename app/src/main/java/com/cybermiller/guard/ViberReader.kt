@@ -3,6 +3,7 @@ package com.cybermiller.guard
 import android.content.Context
 import android.util.Log
 import java.io.File
+import org.json.JSONObject
 
 /**
  * Reads Viber conversation history out of Viber's own SQLite database.
@@ -46,6 +47,8 @@ object ViberReader {
         val mediaFileName: String?,
         /** participants_info._id of the sender (resolves to a phone number). */
         val participantId: Long = 0L,
+        /** fileInfo.FileSize — used to find the saved copy in /sdcard/Pictures/Viber. */
+        val mediaSize: Long = 0L,
     )
 
     /** One conversation row. */
@@ -72,6 +75,30 @@ object ViberReader {
 
     fun available(): Boolean = snapshotReady()
 
+    /** (FileName, FileSize) out of the msg_info JSON blob, tolerant of bad rows. */
+    private fun fileInfo(json: String?): Pair<String, Long>? {
+        if (json.isNullOrBlank()) return null
+        return try {
+            val fi = JSONObject(json).optJSONObject("fileInfo") ?: return null
+            val name = fi.optString("FileName").takeIf { it.isNotEmpty() } ?: return null
+            name to fi.optLong("FileSize", 0L)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Viber stores the public MediaStore URI base64-encoded inside its internal provider URI. */
+    private fun decodeEmbeddedUri(uri: String?): String? {
+        if (uri == null || !uri.contains("provider.internal_files")) return null
+        val token = uri.substringAfterLast('/').substringBefore('?').replace("%3D", "=")
+        return try {
+            val decoded = String(android.util.Base64.decode(token, android.util.Base64.DEFAULT))
+            decoded.takeIf { it.startsWith("content://") }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun dbFile() = File(destDir, "snapshot.db")
     private fun walFile() = File(destDir, "snapshot.db-wal")
 
@@ -95,7 +122,8 @@ object ViberReader {
                     body = r.getOrNull(10) as? String ?: "",
                     mime = (r.getOrNull(23) as? Long ?: 0L).toInt(),
                     mediaUri = r.getOrNull(22) as? String ?: r.getOrNull(21) as? String,
-                    mediaFileName = null,
+                    mediaFileName = fileInfo(r.getOrNull(34) as? String)?.first,
+                    mediaSize = fileInfo(r.getOrNull(34) as? String)?.second ?: 0L,
                     participantId = r.getOrNull(4) as? Long ?: 0L,
                 ))
                 if (out.size >= limit) break
@@ -146,13 +174,32 @@ object ViberReader {
     }
 
     /** Copy attached media to our cache dir and return local File. */
-    fun exportMedia(ctx: Context, mediaUri: String?, fileName: String?): File? {
+    fun exportMedia(ctx: Context, mediaUri: String?, fileName: String?, size: Long = 0L): File? {
         val dir = File(ctx.cacheDir, "viber_media").apply { mkdirs() }
         val out = File(dir, "m_${System.currentTimeMillis()}_${fileName?.let {
             it.replace("[^a-zA-Z0-9.]".toRegex(), "_") } ?: "bin"}")
 
-        // 1) MediaStore destination_uri — directly openable by our app
-        mediaUri?.let { uri ->
+        // 1) Saved copy in /sdcard/Pictures/Viber. Viber renames the file on save,
+        //    so msg_info's FileName rarely matches — FileSize does.
+        val saved = File("/sdcard/Pictures/Viber").listFiles()?.firstOrNull { f ->
+            f.isFile && (f.length() == size || (fileName != null && f.name == fileName))
+        }
+        if (saved != null) {
+            try {
+                saved.inputStream().use { input -> out.outputStream().use { input.copyTo(it) } }
+                if (out.length() > 0) {
+                    Log.i(TAG, "media copied from ${saved.path} (${saved.length()} bytes)")
+                    return out
+                }
+                out.delete()
+            } catch (t: Throwable) {
+                Log.w(TAG, "saved-file copy failed: ${t.message}")
+            }
+        }
+
+        // 2) MediaStore URI (direct, or base64-embedded in Viber's internal URI).
+        //    Often works only for URIs Viber itself shared into the public store.
+        for (uri in listOfNotNull(decodeEmbeddedUri(mediaUri), mediaUri)) {
             try {
                 ctx.contentResolver.openInputStream(android.net.Uri.parse(uri))?.use { input ->
                     out.outputStream().use { input.copyTo(it) }
@@ -162,24 +209,10 @@ object ViberReader {
                     return out
                 } else { out.delete() }
             } catch (t: Throwable) {
-                Log.w(TAG, "content uri read failed: ${t.message}")
+                Log.w(TAG, "content uri read failed for $uri: ${t.message}")
             }
         }
-
-        // 2) direct file read from /sdcard/Pictures/Viber/<fileName> (may fail perms)
-        fileName?.let { name ->
-            val src = "/sdcard/Pictures/Viber/$name"
-            val f = File(src)
-            if (f.exists() && f.canRead()) {
-                f.inputStream().use { input ->
-                    out.outputStream().use { input.copyTo(it) }
-                }
-                if (out.length() > 0) {
-                    Log.i(TAG, "media copied from $src")
-                    return out
-                } else { out.delete() }
-            }
-        }
+        Log.w(TAG, "media unavailable: uri=$mediaUri size=$size")
         out.delete()
         return null
     }
