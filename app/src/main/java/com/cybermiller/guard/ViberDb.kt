@@ -119,7 +119,8 @@ object MiniSqlite {
             val all = ArrayList<List<Any?>>()
             walk(1, all, Int.MAX_VALUE)
             val found = all.mapNotNull { r ->
-                if (r.size >= 4 && r[0] == "table" && r[1] == name) (r[3] as? Long)?.toInt() else null
+                // rowid is column 0 now; sqlite_master: type=1, name=2, tbl_name=3, rootpage=4
+                if (r.size >= 5 && r[1] == "table" && r[2] == name) (r[4] as? Long)?.toInt() else null
             }.firstOrNull()
             Log.i("GuardViberDb", "rootPage($name) -> $found (scanned ${all.size} sqlite_master rows)")
             return found

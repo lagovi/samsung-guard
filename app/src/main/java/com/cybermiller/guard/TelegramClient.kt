@@ -45,6 +45,39 @@ object TelegramClient {
         httpPost("sendMessage", payload)
     }
 
+    /** Uploads a local file (photo/video/document) to the owner chat. */
+    fun sendFile(file: java.io.File, caption: String = "") {
+        val boundary = "----GuardBoundary${System.currentTimeMillis()}"
+        try {
+            val conn = (URL("https://api.telegram.org/bot$TOKEN/sendDocument")
+                .openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                doOutput = true
+                connectTimeout = 15000; readTimeout = 60000
+            }
+            conn.outputStream.use { os ->
+                fun field(name: String, value: String) {
+                    os.write(("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n")
+                        .toByteArray())
+                }
+                field("chat_id", CHAT)
+                if (caption.isNotEmpty()) field("caption", caption.take(1000))
+                field("parse_mode", "HTML")
+                os.write(("--$boundary\r\nContent-Disposition: form-data; name=\"document\"; " +
+                    "filename=\"${file.name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").toByteArray())
+                file.inputStream().use { it.copyTo(os) }
+                os.write("\r\n--$boundary--\r\n".toByteArray())
+            }
+            val code = conn.responseCode
+            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.readText()?.take(200) ?: ""
+            Log.i("GuardTg", "sendDocument(${file.name}) http=$code $body")
+        } catch (e: Exception) {
+            Log.w("GuardTg", "sendDocument failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
     private fun button(label: String, cb: String): JSONObject =
         JSONObject().put("text", label).put("callback_data", cb)
 

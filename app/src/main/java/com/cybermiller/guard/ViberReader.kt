@@ -44,6 +44,8 @@ object ViberReader {
         val mime: Int,           // extra_mime (0=text, 1=photo, …)
         val mediaUri: String?,   // destination_uri for MediaStore or extra_uri
         val mediaFileName: String?,
+        /** participants_info._id of the sender (resolves to a phone number). */
+        val participantId: Long = 0L,
     )
 
     /** One conversation row. */
@@ -82,9 +84,9 @@ object ViberReader {
             val rows = sqlite.table("messages", 50_000)
             val out = ArrayList<Msg>(rows.size)
             for (r in rows) {
-                if (r.size < 11) continue                               // need at least msg_date(6), send_type(9), body(10), extra_mime(23)
+                if (r.size < 25) continue                               // need msg_date(6), send_type(9), body(10), extra_mime(23)
                 if (r[2] as? Long ?: 0L != conversationId) continue     // conversation_id
-                if (r.size > 19 && r[19] as? Long ?: 0L == 1L) continue // deleted
+                if (r[19] as? Long ?: 0L == 1L) continue                // deleted
                 out.add(Msg(
                     id = r[0] as? Long ?: 0L,
                     conversationId = r[2] as? Long ?: 0L,
@@ -92,8 +94,9 @@ object ViberReader {
                     ts = r[6] as? Long ?: 0L,
                     body = r.getOrNull(10) as? String ?: "",
                     mime = (r.getOrNull(23) as? Long ?: 0L).toInt(),
-                    mediaUri = r.getOrNull(22) as? String,
+                    mediaUri = r.getOrNull(22) as? String ?: r.getOrNull(21) as? String,
                     mediaFileName = null,
+                    participantId = r.getOrNull(4) as? Long ?: 0L,
                 ))
                 if (out.size >= limit) break
             }
@@ -113,7 +116,6 @@ object ViberReader {
             val out = ArrayList<Convo>(rows.size)
             for (r in rows) {
                 if (r.isEmpty()) continue                               // need at least _id
-                Log.i(TAG, "  master row len=${r.size}: ${r.joinToString(",") { it.toString() }}")
                 if (r.size > 10 && r[10] as? Long ?: 0L == 1L) continue // deleted
                 out.add(Convo(
                     id = r[0] as? Long ?: 0L,

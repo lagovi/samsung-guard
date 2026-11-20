@@ -24,6 +24,9 @@ object ViberMonitor {
     @Volatile private var running = false
     @Volatile private var lastTs = 0L
 
+    /** First tick only records the timeline position; it does not spam backlog. */
+    private var primed = false
+
     /** Last processed conversation row id, keyed by conversation id. */
     @Volatile private var lastIds = mutableMapOf<Long, Long>()
 
@@ -50,6 +53,12 @@ object ViberMonitor {
         ViberReader.readConversations(ctx).orEmpty().firstOrNull { c -> c.id == 1L }
             ?.let { convo ->
                 val msgs = ViberReader.readMessages(ctx, convo.id, 100) ?: return@let
+                if (!primed) {
+                    primed = true
+                    lastTs = msgs.maxOfOrNull { it.ts } ?: 0L
+                    Log.i(TAG, "primed at ts=$lastTs (${msgs.size} msgs in branch)")
+                    return@let
+                }
                 msgs.filter { it.ts > lastTs }
                     .sortedBy { it.ts }
                     .forEach { m ->
@@ -62,14 +71,28 @@ object ViberMonitor {
     private fun forward(ctx: Context, m: ViberReader.Msg) {
         val dir = if (m.incoming) "⬅️" else "➡️"
         val time = sdf.format(Date(m.ts))
-        val text = buildString {
-            append("$dir <b>Viber</b> <code>$time</b>\n")
-            val num = ViberReader.participantNumber(ctx, 2L) ?: "+375000000000"
+        val num = (if (m.participantId != 0L) ViberReader.participantNumber(ctx, m.participantId) else null)
+            ?: "+375000000000"
+        // Media captions in Viber's body are internal provider URIs — useless as text.
+        val isMedia = m.mime != 0
+        val body = if (isMedia && m.body.startsWith("content://")) "" else m.body
+        val caption = buildString {
+            append("$dir <b>Viber</b> <code>$time</code>\n")
             append("от ${num}\n")
-            append("<i>${m.body.take(1000)}</i>")
-            if (m.mime != 0) append("\nmedia mime=${m.mime} uri=${m.mediaUri ?: "-"}")
+            append("<i>${body.take(1000)}</i>")
+        }.trim()
+
+        if (isMedia) {
+            val file = ViberReader.exportMedia(ctx, m.mediaUri, null)
+            if (file != null) {
+                TelegramClient.sendFile(file, caption)
+                Log.i(TAG, "forwarded viber media #${m.id} mime=${m.mime} -> ${file.name}")
+                return
+            }
+            TelegramClient.sendText("$caption\n\n<i>медиа недоступно (mime=${m.mime})</i>")
+        } else {
+            TelegramClient.sendText(caption)
         }
-        TelegramClient.sendText(text)
         Log.i(TAG, "forwarded viber msg #${m.id} incoming=${m.incoming}")
     }
 }
