@@ -84,6 +84,7 @@ object ViberReader {
             val rows = sqlite.table("messages", 50_000)
             val out = ArrayList<Msg>(rows.size)
             for (r in rows) {
+                if (out.isEmpty()) Log.i(TAG, "MSGROW[${r.size}]=" + r.map { it?.toString() ?: "null" })
                 if (r.size < 25) continue                               // need msg_date(6), send_type(9), body(10), extra_mime(23)
                 if (r[2] as? Long ?: 0L != conversationId) continue     // conversation_id
                 if (r[19] as? Long ?: 0L == 1L) continue                // deleted
