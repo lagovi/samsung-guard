@@ -109,6 +109,7 @@ object ViberReader {
         val rebuilt = ViberDb.rebuild(db) ?: return null
         MiniSqlite.Db(rebuilt.db).use { sqlite ->
             val rows = sqlite.table("messages", 50_000)
+            if (rows.isEmpty()) return null   // torn copy / partial WAL, not a real empty branch
             val out = ArrayList<Msg>(rows.size)
             for (r in rows) {
                 if (r.size < 25) continue                               // need msg_date(6), send_type(9), body(10), extra_mime(23)
