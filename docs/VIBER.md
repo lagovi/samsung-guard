@@ -42,8 +42,23 @@ files directly as `root`.
 | `extra_uri` | internal_files thumbnail URI (not exported) |
 | `msg_info` | JSON with `FileName`, `FileSize`, `MediaMetadata`, dimensions |
 
-Media: `destination_uri` opens via `ContentResolver` (public MediaStore). Fallback:
-root-copies `/sdcard/Pictures/Viber/<FileName>` from `msg_info`.
+Media: `extra_uri` is Viber's internal provider (we cannot read it);
+`destination_uri` is a public MediaStore URI and opens fine via `ContentResolver`.
+Fallback: root-copies `/sdcard/Pictures/Viber/<FileName>`.
+
+## Column order in the pager (important)
+
+`MiniSqlite.cell()` returns raw record columns. Two rules bite:
+
+1. Serial types in the record header are **varints**, not single bytes. Any
+   TEXT/BLOB longer than 63 bytes gets type >= 128 and occupies two bytes;
+   reading one byte per type shifts every following column.
+2. `INTEGER PRIMARY KEY AUTOINCREMENT` is an alias of the rowid, so its column
+   is stored as a NULL placeholder in the record. `cell()` substitutes the real
+   rowid there. `sqlite_master` has no such column, so its col 0 stays as-is.
+
+With both handled, pager indices match `pragma table_info` exactly — no +1
+shifts anywhere.
 
 ## Write path (sending to Viber)
 
@@ -62,9 +77,13 @@ mirroring D-03 (owner confirmation before any mutation).
 
 `ViberMonitor` runs inside `GuardService` on the single-thread scheduler:
 every 60 s it scans the watched conversation for rows newer than the last seen
-`msg_date` and forwards them to Telegram (`<b>Viber</b> from +375…: <text>`).
-Media captions are forwarded; images are downloaded to cache and can be attached
-to a follow-up Telegram `sendPhoto` later.
+`msg_date` and forwards them to Telegram. The first scan only records the
+timeline position (`primed at ts=…`) so the existing history is not replayed.
+
+Text messages go as `<dir> Viber <time>` + sender number + body. Media
+(`extra_mime != 0`) is exported via `exportMedia()` and uploaded with
+`TelegramClient.sendFile()` (multipart `sendDocument`); if the file cannot be
+read, a text notice is sent instead.
 
 Root check (`su -c true`) is done once at init; if root disappears, Viber
 monitoring stays silent instead of crashing.
