@@ -19,7 +19,10 @@ android {
         // Committed throwaway debug key: keeps every CI artifact installable
         // over the previous one (same signature).
         getByName("debug") {
-            storeFile = rootProject.file("keystore/debug.keystore")
+            // Repo keystore unless ANDROID_DEBUG_KEYSTORE points elsewhere.
+            // CI uses this committed key; a local build uses ~/.config/.android,
+            // which holds the key the device already has installed.
+            storeFile = file(System.getenv("ANDROID_DEBUG_KEYSTORE") ?: "${System.getProperty("user.home")}/.config/.android/debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
