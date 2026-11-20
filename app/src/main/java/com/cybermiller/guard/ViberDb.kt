@@ -119,8 +119,8 @@ object MiniSqlite {
             val all = ArrayList<List<Any?>>()
             walk(1, all, Int.MAX_VALUE)
             val found = all.mapNotNull { r ->
-                // rowid is column 0 now; sqlite_master: type=1, name=2, tbl_name=3, rootpage=4
-                if (r.size >= 5 && r[1] == "table" && r[2] == name) (r[4] as? Long)?.toInt() else null
+                // sqlite_master: type=0, name=1, tbl_name=2, rootpage=3
+                if (r.size >= 4 && r[0] == "table" && r[1] == name) (r[3] as? Long)?.toInt() else null
             }.firstOrNull()
             Log.i("GuardViberDb", "rootPage($name) -> $found (scanned ${all.size} sqlite_master rows)")
             return found
@@ -186,11 +186,12 @@ object MiniSqlite {
             val hdrEnd = (headerSize.coerceAtMost(rec.size.toLong())).toInt()
             var dataPos = hdrEnd
 
-            val out = ArrayList<Any?>(33)
-            out.add(rowid) // _id = rowid (INTEGER PRIMARY KEY is not stored in record body)
+            val out = ArrayList<Any?>(48)
             while (serialPos < hdrEnd && serialPos < rec.size) {
-                val t = rec[serialPos].toInt() and 0xFF
-                serialPos++
+                // Serial types are varints too: values >= 128 take two bytes.
+                val tv = readVarint(rec, serialPos)
+                val t = tv.first.toInt()
+                serialPos = tv.second
                 // NULL serial types: 0, 10, 11 (reserved)
                 if (t == 0 || t == 10 || t == 11) {
                     out.add(null); continue
@@ -203,6 +204,9 @@ object MiniSqlite {
                 out.add(valFor(t, rec, dataPos, len))
                 dataPos += len
             }
+            // INTEGER PRIMARY KEY is an alias of the rowid, so its column slot in
+            // the record is a NULL placeholder. Substitute the real rowid.
+            if (out.isNotEmpty()) out[0] = rowid
             return out
         }
 
@@ -227,7 +231,8 @@ object MiniSqlite {
                     if (len < 8 && b[off].toInt() < 0) v = v or (0xFFL shl (len * 8))
                     v
                 }
-                else -> String(b, off, len)   // BLOB / TEXT (12+)
+                // t >= 13 odd = TEXT, t >= 12 even = BLOB. Both are UTF-8 here.
+                else -> String(b, off, len, Charsets.UTF_8)
             }
         }
 
