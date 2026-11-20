@@ -225,7 +225,17 @@ object ViberReader {
     }
 }
 
-/** Sends (or opens for sending) messages into Viber. */
+/**
+ * Sends messages into Viber.
+ *
+ * Root cannot be obtained from the app process on this ROM (SELinux blocks
+ * `su` from untrusted_app — the same reason the DB snapshot is produced by a
+ * Magisk script), and `input text` cannot type Cyrillic. So the app never
+ * touches the UI itself: it drops a command file into `files/outbox/`, and the
+ * root watcher in `/data/adb/service.d/99-viber-guard.sh` runs the real send
+ * (`am start ACTION_SEND` + two taps). The text rides inside the Intent, so any
+ * Unicode survives intact.
+ */
 object ViberSender {
     private const val TAG = "GuardViber"
 
@@ -242,30 +252,35 @@ object ViberSender {
         }
     }
 
+    fun outboxDir(ctx: Context): File =
+        File(ctx.getExternalFilesDir(null), "outbox").apply { mkdirs() }
+
+    fun ackDir(ctx: Context): File =
+        File(ctx.getExternalFilesDir(null), "outbox_ack").apply { mkdirs() }
+
     /**
-     * Sends `text` into Viber chat with `number` using root input injection:
-     * opens the chat via deep link, types the text, taps the Send button.
-     * The Send coordinates are tuned for 720x1280 (Galaxy J5) and can be
-     * overridden with system properties `viber.send.x` / `viber.send.y`.
+     * Queues `text` for delivery into the Viber chat with `number`.
+     *
+     * File format (one command per file, name = epoch millis):
+     *   line 1: phone number
+     *   line 2: base64(UTF-8 reply text)
+     * The root watcher consumes the file and writes a `.ack` next to it.
      */
     fun sendReply(ctx: Context, number: String, text: String) {
-        openChat(ctx, number)
-        try { Thread.sleep(1500) } catch (_: InterruptedException) {}
-        // %s is the space escape understood by `input text`
-        val safe = text.replace(" ", "%s")
-        try {
-            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "input text $safe"))
-            p.waitFor(5, TimeUnit.SECONDS)
-        } catch (t: Throwable) {
-            Log.w(TAG, "input text failed: ${t.message}")
-        }
-        val sendX = System.getProperty("viber.send.x", "660").toIntOrNull() ?: 660
-        val sendY = System.getProperty("viber.send.y", "1210").toIntOrNull() ?: 1210
-        try {
-            Runtime.getRuntime().exec(arrayOf("su", "-c", "input tap $sendX $sendY"))
-        } catch (t: Throwable) {
-            Log.w(TAG, "tap send failed: ${t.message}")
-        }
-        Log.i(TAG, "reply sent to $number")
+        // Viber's picker only accepts the "+375…" full form, never bare digits.
+        val norm = if (number.startsWith("+")) number else "+" + number.filter { it.isDigit() }
+        val b64 = android.util.Base64.encodeToString(
+            text.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+        val f = File(outboxDir(ctx), "${System.currentTimeMillis()}.req")
+        f.writeText("$norm\n$b64\n")
+        Log.i(TAG, "reply queued: ${f.name} -> $norm (${text.length} chars)")
+    }
+
+    /** Confirms delivery by consuming the watcher's ack file, if present. */
+    fun takeAck(ctx: Context): Boolean {
+        val ack = ackDir(ctx).listFiles()?.firstOrNull() ?: return false
+        val ok = ack.readText().trim() == "ok"
+        ack.delete()
+        return ok
     }
 }

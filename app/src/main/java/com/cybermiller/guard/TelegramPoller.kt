@@ -128,8 +128,20 @@ object TelegramPoller {
             "viber_reply" -> {
                 awaitingReply[CHAT.toLong()] = arg
                 Log.i(TAG, "awaiting reply from owner -> $arg")
-                editMessage(cb.optJSONObject("message")?.optLong("message_id", 0) ?: 0,
-                    "✏️ Введите текст ответа для $arg (следующее ваше сообщение в этом чате)")
+                // ForceReply binds the owner's next message to this prompt, so the
+                // reply is unambiguous even if other chat traffic arrives. The phone
+                // number travels in the quoted prompt text, so state also survives
+                // a service restart.
+                post("sendMessage", JSONObject().apply {
+                    put("chat_id", CHAT)
+                    put("text", "✏️ Ответ в Viber для <code>$arg</code>\n" +
+                        "Отправьте текст ответа следующим сообщением.")
+                    put("parse_mode", "HTML")
+                    put("reply_markup", JSONObject().apply {
+                        put("force_reply", true)
+                        put("input_field_placeholder", "Текст ответа в Viber…")
+                    })
+                })
             }
             "viber_read" -> {
                 val conversationId = arg.toLongOrNull() ?: return
@@ -150,40 +162,67 @@ object TelegramPoller {
         }
     }
 
+    /**
+     * Uploads the whole conversation as rich messages in chronological order.
+     * Photos are embedded in the message body (tg://photo?id=) instead of being
+     * sent as separate documents; internal Viber content:// URIs never surface.
+     *
+     * Messages are packed into batches (≤ 10 photos) so a 100-message history
+     * does not turn into 100 separate Telegram posts.
+     */
     private fun sendViberHistory(ctx: Context, msgs: List<ViberReader.Msg>, phone: String) {
-        val DATE_FMT = "yyyy-MM-dd HH:mm:ss"
-        val sdf = java.text.SimpleDateFormat(DATE_FMT, java.util.Locale.ROOT).apply {
-            timeZone = java.util.TimeZone.getTimeZone("UTC")
-        }
-        val sb = StringBuilder()
-        sb.append("<b>История диалога в Viber</b> (от ${phone})\n")
-        sb.append("Всего сообщений: ${msgs.size}\n\n")
+        val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.ROOT)
+        val ordered = msgs.sortedBy { it.ts }
 
-        for (m in msgs) {
+        val header = "**📜 История диалога в Viber**\nс `$phone` — ${ordered.size} сообщ.\n\n"
+        var chunk = StringBuilder(header)
+        var attach = ArrayList<Pair<String, java.io.File>>()
+        var marked = false
+
+        fun flush() {
+            if (chunk.isBlank()) return
+            if (attach.isEmpty()) {
+                TelegramClient.sendRich(chunk.toString())
+            } else {
+                TelegramClient.sendRich(chunk.toString(), null, attach)
+            }
+            chunk = StringBuilder()
+            attach = ArrayList()
+        }
+
+        for (m in ordered) {
             val dir = if (m.incoming) "⬅️" else "➡️"
-            sb.append("$dir <b>Viber</b> <code>${sdf.format(java.util.Date(m.ts))}</code>\n")
-            val body = if (m.mime != 0 && m.body.startsWith("content://")) "" else m.body.take(400)
-            sb.append("<i>$body</i>\n")
-            // Media: attach the file inline with the line so images are visible.
-            if (m.mime != 0) {
+            val isMedia = m.mime != 0
+            val text = if (isMedia && m.body.startsWith("content://")) "" else m.body
+
+            if (isMedia) {
                 val file = ViberReader.exportMedia(ctx, m.mediaUri, m.mediaFileName, m.mediaSize)
                 if (file != null) {
-                    val cap = "$dir Viber ${sdf.format(java.util.Date(m.ts))} от $phone\n<i>${m.body.take(400)}</i>"
-                    TelegramClient.sendFile(file, cap)
+                    // Batch cap: 10 photos per rich message.
+                    if (attach.size >= 10) flush()
+                    val id = "m${attach.size}"
+                    attach.add(id to file)
+                    chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts))).append("` ")
+                    if (text.isNotBlank()) chunk.append(text.take(300)).append(" ")
+                    chunk.append("![](tg://photo?id=$id)\n\n")
                 } else {
-                    sb.append("<i>медиа недоступно (mime=${m.mime})</i>\n")
+                    if (attach.isNotEmpty()) flush()
+                    chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts)))
+                        .append("` _(медиа недоступно)_")
+                    if (text.isNotBlank()) chunk.append("\n").append(text.take(300))
+                    chunk.append("\n\n")
                 }
+            } else {
+                if (attach.isNotEmpty()) flush()
+                chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts))).append("` ")
+                chunk.append(if (text.isNotBlank()) text.take(800) else "_(пусто)_")
+                chunk.append("\n\n")
             }
-            sb.append("\n")
-        }
 
-        var chunk = sb.toString()
-        while (chunk.isNotEmpty()) {
-            val part = if (chunk.length > 3500) chunk.substring(0, 3500) else chunk
-            TelegramClient.sendText(part)
-            if (chunk.length > 3500) chunk = chunk.substring(3500)
-            else break
+            if (chunk.length > 28_000) flush()   // rich message limit is 32768 chars
+            marked = true
         }
+        if (marked) flush()
     }
 
     private fun answerCallback(cbId: String, text: String) {

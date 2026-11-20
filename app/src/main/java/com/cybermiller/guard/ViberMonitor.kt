@@ -18,7 +18,7 @@ object ViberMonitor {
     private const val TAG = "GuardViber"
     private const val DATE_FMT = "yyyy-MM-dd HH:mm:ss"
     private val sdf = SimpleDateFormat(DATE_FMT, Locale.ROOT).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
+        timeZone = TimeZone.getDefault()
     }
 
     @Volatile private var running = false
@@ -73,26 +73,36 @@ object ViberMonitor {
         val time = sdf.format(Date(m.ts))
         val num = (if (m.participantId != 0L) ViberReader.participantNumber(ctx, m.participantId) else null)
             ?: "+375000000000"
-        // Media captions in Viber's body are internal provider URIs — useless as text.
-        val isMedia = m.mime != 0
-        val body = if (isMedia && m.body.startsWith("content://")) "" else m.body
-        val caption = buildString {
-            append("$dir <b>Viber</b> <code>$time</code>\n")
-            append("от ${num}\n")
-            append("<i>${body.take(1000)}</i>")
-        }.trim()
 
-        if (isMedia) {
-            val file = ViberReader.exportMedia(ctx, m.mediaUri, m.mediaFileName, m.mediaSize)
-            if (file != null) {
-                TelegramClient.sendViberAlert(ctx, conversationId, num, caption, file)
-                Log.i(TAG, "forwarded viber media #${m.id} mime=${m.mime} -> ${file.name}")
-                return
+        // Media captions in Viber's body are internal provider URIs — never show them.
+        val isMedia = m.mime != 0 && m.body.startsWith("content://")
+        val body = if (isMedia) "" else m.body
+
+        val attach = ArrayList<Pair<String, java.io.File>>()
+        val mediaFile = if (m.mime != 0) {
+            ViberReader.exportMedia(ctx, m.mediaUri, m.mediaFileName, m.mediaSize)?.also {
+                attach.add("m1" to it)
             }
-            TelegramClient.sendText("$caption\n\n<i>медиа недоступно (mime=${m.mime})</i>")
-        } else {
-            TelegramClient.sendViberAlert(ctx, conversationId, num, caption)
+        } else null
+
+        val rich = buildString {
+            append("**$dir Viber** `")
+            append(time)
+            append("`\n")
+            append("от $num\n")
+            if (body.isNotBlank()) {
+                append("\n")
+                append(body.take(1500))
+            }
+            if (mediaFile != null) {
+                append("\n\n![](tg://photo?id=m1)")
+            }
+            if (m.mime != 0 && mediaFile == null) {
+                append("\n\n<i>(медиа недоступно)</i>")
+            }
         }
-        Log.i(TAG, "forwarded viber msg #${m.id} incoming=${m.incoming}")
+
+        TelegramClient.sendViberAlert(ctx, conversationId, num, rich, attach)
+        Log.i(TAG, "forwarded viber msg #${m.id} incoming=${m.incoming} media=${mediaFile != null}")
     }
 }
