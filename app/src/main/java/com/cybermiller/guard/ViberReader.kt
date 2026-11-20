@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import java.io.File
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 /**
  * Reads Viber conversation history out of Viber's own SQLite database.
@@ -174,6 +175,11 @@ object ViberReader {
         return null
     }
 
+    /** Reads the whole conversation branch, newest first. Used by "Прочитать весь диалог". */
+    fun readAllMessages(ctx: Context, conversationId: Long): List<Msg>? {
+        return readMessages(ctx, conversationId, 5000)?.reversed()
+    }
+
     /** Copy attached media to our cache dir and return local File. */
     fun exportMedia(ctx: Context, mediaUri: String?, fileName: String?, size: Long = 0L): File? {
         val dir = File(ctx.cacheDir, "viber_media").apply { mkdirs() }
@@ -234,5 +240,32 @@ object ViberSender {
         } catch (t: Throwable) {
             Log.w(TAG, "deep link failed: ${t.message}")
         }
+    }
+
+    /**
+     * Sends `text` into Viber chat with `number` using root input injection:
+     * opens the chat via deep link, types the text, taps the Send button.
+     * The Send coordinates are tuned for 720x1280 (Galaxy J5) and can be
+     * overridden with system properties `viber.send.x` / `viber.send.y`.
+     */
+    fun sendReply(ctx: Context, number: String, text: String) {
+        openChat(ctx, number)
+        try { Thread.sleep(1500) } catch (_: InterruptedException) {}
+        // %s is the space escape understood by `input text`
+        val safe = text.replace(" ", "%s")
+        try {
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "input text $safe"))
+            p.waitFor(5, TimeUnit.SECONDS)
+        } catch (t: Throwable) {
+            Log.w(TAG, "input text failed: ${t.message}")
+        }
+        val sendX = System.getProperty("viber.send.x", "660").toIntOrNull() ?: 660
+        val sendY = System.getProperty("viber.send.y", "1210").toIntOrNull() ?: 1210
+        try {
+            Runtime.getRuntime().exec(arrayOf("su", "-c", "input tap $sendX $sendY"))
+        } catch (t: Throwable) {
+            Log.w(TAG, "tap send failed: ${t.message}")
+        }
+        Log.i(TAG, "reply sent to $number")
     }
 }

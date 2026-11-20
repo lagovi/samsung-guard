@@ -36,6 +36,68 @@ object TelegramClient {
         httpPost("sendMessage", payload)
     }
 
+    /** Sends a Viber message text (optionally with media) plus inline buttons:
+     *  "Открыть в Viber" → deep link to the chat,
+     *  "Прочитать весь диалог" → re-upload the whole conversation history,
+     *  "Ответить" → owner types reply in Telegram, it's injected into Viber. */
+    fun sendViberAlert(ctx: Context, conversationId: Long, phone: String, text: String, file: java.io.File? = null) {
+        val kb = JSONArray().apply {
+            put(JSONArray().apply {
+                put(button("💬 Открыть в Viber", "viber_open:$phone"))
+                put(button("📜 Прочитать весь диалог", "viber_read:$conversationId"))
+            })
+            put(JSONArray().apply {
+                put(button("✏️ Ответить", "viber_reply:$phone"))
+            })
+        }
+        if (file != null) {
+            sendFileWithMarkup(file, text, kb)
+        } else {
+            sendMessageWithMarkup(text, kb)
+        }
+    }
+
+    private fun sendMessageWithMarkup(text: String, kb: JSONArray) {
+        val payload = JSONObject().apply {
+            put("chat_id", CHAT)
+            put("text", text)
+            put("parse_mode", "HTML")
+            put("reply_markup", JSONObject().put("inline_keyboard", kb))
+        }
+        httpPost("sendMessage", payload)
+    }
+
+    private fun sendFileWithMarkup(file: java.io.File, caption: String, kb: JSONArray) {
+        val boundary = "----GuardBoundary${System.currentTimeMillis()}"
+        try {
+            val conn = (URL("https://api.telegram.org/bot$TOKEN/sendDocument")
+                .openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                doOutput = true
+                connectTimeout = 15000; readTimeout = 60000
+            }
+            conn.outputStream.use { os ->
+                fun field(name: String, value: String) {
+                    os.write(("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n")
+                        .toByteArray())
+                }
+                field("chat_id", CHAT)
+                if (caption.isNotEmpty()) field("caption", caption.take(1000))
+                field("parse_mode", "HTML")
+                field("reply_markup", JSONObject().put("inline_keyboard", kb).toString())
+                os.write(("--$boundary\r\nContent-Disposition: form-data; name=\"document\"; " +
+                    "filename=\"${file.name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").toByteArray())
+                file.inputStream().use { it.copyTo(os) }
+                os.write("\r\n--$boundary--\r\n".toByteArray())
+            }
+            val code = conn.responseCode
+            Log.i("GuardTg", "sendDocumentWithMarkup(${file.name}) http=$code")
+        } catch (e: Exception) {
+            Log.w("GuardTg", "sendDocumentWithMarkup failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
     fun sendText(text: String) {
         val payload = JSONObject().apply {
             put("chat_id", CHAT)

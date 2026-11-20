@@ -17,6 +17,15 @@ object TelegramPoller {
     @Volatile private var running = false
     private var offset = 0L
 
+    /** chat_id -> phone number awaiting an owner reply typed in Telegram. */
+    @Volatile private var awaitingReply = mutableMapOf<Long, String>()
+
+    /** Sets the phone number the next owner message in `chat` will be sent to in Viber. */
+    fun awaitReply(chatId: Long, phone: String) {
+        awaitingReply[chatId] = phone
+        Log.i(TAG, "awaiting reply in chat $chatId -> $phone")
+    }
+
     fun start(ctx: Context) {
         if (running) return
         running = true
@@ -53,6 +62,30 @@ object TelegramPoller {
             if (chatId != CHAT.toLong()) continue
             val cb = upd.optJSONObject("callback_query") ?: continue
             handleCallback(ctx, cb)
+            val cb = upd.optJSONObject("callback_query")
+            if (cb != null) {
+                handleCallback(ctx, cb)
+            } else {
+                handleOwnerMessage(ctx, upd)
+            }
+        }
+    }
+
+    /** Routes a plain message from the owner. If chat is awaiting a Viber reply,
+     *  forwards the typed text into Viber; otherwise ignores it. */
+    private fun handleOwnerMessage(ctx: Context, upd: JSONObject) {
+        val msg = upd.optJSONObject("message") ?: return
+        val chatId = msg.optJSONObject("chat")?.optLong("id", 0L) ?: return
+        if (chatId != CHAT.toLong()) return
+        val phone = awaitingReply.remove(chatId) ?: return
+        val text = msg.optString("text", "")
+        if (text.isBlank()) return
+        try {
+            ViberSender.sendReply(ctx, phone, text)
+            sendText("✅ Ответ отправлен в Viber ($phone):\n<i>${text.take(400)}</i>")
+        } catch (e: Throwable) {
+            sendText("❌ Не удалось отправить ответ в Viber: ${e.message}")
+            Log.w(TAG, "sendReply failed", e)
         }
     }
 
@@ -60,35 +93,76 @@ object TelegramPoller {
         val data = cb.optString("data", "")
         Log.i(TAG, "callback data=$data")
         val parts = data.split(":")
-        if (parts.size != 2) {
+        if (parts.size < 2) {
             Log.w(TAG, "callback bad data: $data")
             return
         }
         val action = parts[0]
-        val id = parts[1].toLongOrNull()
-        if (id == null) {
-            Log.w(TAG, "callback bad id: $data")
-            return
-        }
+        val arg = parts[1]
         when (action) {
             "keep" -> {
+                val id = arg.toLongOrNull() ?: return
                 SmsStore.markHandled(ctx, id, "kept", "owner kept")
                 Log.i(TAG, "sms #$id kept by owner")
             }
             "del" -> {
+                val id = arg.toLongOrNull() ?: return
                 SmsStore.deleteSms(ctx, id)
                 Log.i(TAG, "sms #$id deleted by owner")
             }
             "viber" -> {
-                val num = parts[1]
-                ViberSender.openChat(ctx, num)
-                Log.i(TAG, "opened viber chat $num")
+                ViberSender.openChat(ctx, arg)
+                Log.i(TAG, "opened viber chat $arg")
+            }
+            "viber_open" -> {
+                ViberSender.openChat(ctx, arg)
+                Log.i(TAG, "opened viber chat $arg")
+            }
+            "viber_reply" -> {
+                awaitingReply[CHAT.toLong()] = arg
+                Log.i(TAG, "awaiting reply from owner -> $arg")
+                editMessage(cb.optJSONObject("message")?.optLong("message_id", 0) ?: 0,
+                    "✏️ Введите текст ответа для $arg (следующее ваше сообщение в этом чате)")
+            }
+            "viber_read" -> {
+                val conversationId = arg.toLongOrNull() ?: return
+                ViberReader.readAllMessages(ctx, conversationId)?.let { msgs ->
+                    val phone = ViberReader.participantNumber(ctx, 2L) ?: "?"
+                    sendViberHistory(msgs, phone)
+                } ?: run {
+                    sendText("❌ Не удалось прочитать историю диалога")
+                }
+                Log.i(TAG, "read all messages for conv $conversationId")
             }
             else -> Log.w(TAG, "callback unknown action: $action")
         }
         val msgId = cb.optJSONObject("message")?.optLong("message_id", 0) ?: 0
-        answerCallback(cb.optString("id"), if (action == "del") "Удалено" else "Оставлено")
-        editMessage(msgId, if (action == "del") "🗑 Удалено по решению владельца" else "✅ Оставлено")
+        answerCallback(cb.optString("id"), if (action == "del") "Удалено" else "Ок")
+        if (action == "del") {
+            editMessage(msgId, "🗑 Удалено по решению владельца")
+        }
+    }
+
+    private fun sendViberHistory(msgs: List<ViberReader.Msg>, phone: String) {
+        val lines = ArrayList<String>()
+        lines.add("<b>История диалога в Viber</b> (от ${phone})")
+        lines.add("Всего сообщений: ${msgs.size}")
+        lines.add("")
+        val DATE_FMT = "yyyy-MM-dd HH:mm:ss"
+        val sdf = java.text.SimpleDateFormat(DATE_FMT, java.util.Locale.ROOT).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }
+        for (m in msgs) {
+            val dir = if (m.incoming) "⬅️" else "➡️"
+            lines.add("$dir <b>Viber</b> <code>${sdf.format(java.util.Date(m.ts))}</code>\n<i>${m.body.take(400)}</i>")
+        }
+        var chunk = lines.joinToString("\n")
+        while (chunk.isNotEmpty()) {
+            val part = if (chunk.length > 3500) chunk.substring(0, 3500) else chunk
+            TelegramClient.sendText(part)
+            if (chunk.length > 3500) chunk = chunk.substring(3500)
+            else break
+        }
     }
 
     private fun answerCallback(cbId: String, text: String) {
