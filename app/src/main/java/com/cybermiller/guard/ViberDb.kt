@@ -151,16 +151,18 @@ object MiniSqlite {
             val base = if (pageNo == 1) Db.PAGE1_HEADER else 0
             val kind = page[base].toInt() and 0xFF
             if (kind == 0x05) { // interior table b-tree
+                // Header: type(1) freeblock(2) ncell(2) cellContent(2) frag(1) rightChild(4)
+                // => cell pointer array starts at offset 12.
                 val cells = u16be(page, base + 3)
                 for (i in 0 until cells) {
-                    val cellPtrOff = base + 8 + i * 2
-                    val cellContentOff = u16be(page, cellPtrOff)
+                    val cellContentOff = u16be(page, base + 12 + i * 2)
                     val child = u32be(page, cellContentOff)
                     if (child >= 1 && child <= pageCount) walk(child, out, limit)
                 }
-                val right = u32be(page, base + 8 + cells * 2)
+                val right = u32be(page, base + 8)
                 if (right >= 1 && right <= pageCount) walk(right, out, limit)
             } else if (kind == 0x0D) { // leaf table b-tree
+                // Header: type(1) freeblock(2) ncell(2) cellContent(2) frag(1) => ptrs at 8.
                 val cells = u16be(page, base + 3)
                 for (i in 0 until cells) {
                     val ptr = u16be(page, base + 8 + i * 2)
