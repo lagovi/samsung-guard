@@ -85,13 +85,13 @@ object ViberMonitor {
         if (isMedia) {
             val file = ViberReader.exportMedia(ctx, m.mediaUri, m.mediaFileName, m.mediaSize)
             if (file != null) {
-                TelegramClient.sendViberAlert(ctx, convo.id, num, caption, file)
+                TelegramClient.sendViberAlert(ctx, conversationId, num, caption, file)
                 Log.i(TAG, "forwarded viber media #${m.id} mime=${m.mime} -> ${file.name}")
                 return
             }
             TelegramClient.sendText("$caption\n\n<i>медиа недоступно (mime=${m.mime})</i>")
         } else {
-            TelegramClient.sendViberAlert(ctx, convo.id, num, caption)
+            TelegramClient.sendViberAlert(ctx, conversationId, num, caption)
         }
         Log.i(TAG, "forwarded viber msg #${m.id} incoming=${m.incoming}")
     }
