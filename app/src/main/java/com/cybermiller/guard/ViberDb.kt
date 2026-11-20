@@ -119,8 +119,10 @@ object MiniSqlite {
             val all = ArrayList<List<Any?>>()
             walk(1, all, Int.MAX_VALUE)
             val found = all.mapNotNull { r ->
-                // sqlite_master: type=0, name=1, tbl_name=2, rootpage=3
-                if (r.size >= 4 && r[0] == "table" && r[1] == name) (r[3] as? Long)?.toInt() else null
+                // sqlite_master row: type, name, tbl_name, rootpage, sql
+                val base = if (r.size >= 5) 0 else 1   // col 0 may be the rowid
+                if (r.size >= base + 4 && r[base] == "table" && r[base + 1] == name)
+                    (r[base + 3] as? Long)?.toInt() else null
             }.firstOrNull()
             Log.i("GuardViberDb", "rootPage($name) -> $found (scanned ${all.size} sqlite_master rows)")
             return found
@@ -205,8 +207,10 @@ object MiniSqlite {
                 dataPos += len
             }
             // INTEGER PRIMARY KEY is an alias of the rowid, so its column slot in
-            // the record is a NULL placeholder. Substitute the real rowid.
-            if (out.isNotEmpty()) out[0] = rowid
+            // the record is a NULL placeholder — substitute the real rowid.
+            // sqlite_master has no INTEGER PRIMARY KEY column (DDL = column 4),
+            // so there col 0 is the rowid alone.
+            if (out.size >= 2 && out[0] == null) out[0] = rowid
             return out
         }
 
