@@ -75,8 +75,17 @@ object TelegramPoller {
         val msg = upd.optJSONObject("message") ?: return
         val chatId = msg.optJSONObject("chat")?.optLong("id", 0L) ?: return
         if (chatId != CHAT.toLong()) return
-        val phone = awaitingReply.remove(chatId) ?: return
         val text = msg.optString("text", "")
+        if (text.startsWith("/start")) {
+            TelegramClient.sendText("🛡 Guard бот.\n" +
+                "Команды: /start — эта справка.\n" +
+                "Кнопки под сообщениями Viber:\n" +
+                "• «Открыть в Viber» — открыть чат в приложении Viber\n" +
+                "• «Прочитать весь диалог» — выгрузить всю историю из БД Viber\n" +
+                "• «Ответить» — введите следующее сообщение в этом чате, оно отправится в Viber от вашего номера")
+            return
+        }
+        val phone = awaitingReply.remove(chatId) ?: return
         if (text.isBlank()) return
         try {
             ViberSender.sendReply(ctx, phone, text)
@@ -142,19 +151,33 @@ object TelegramPoller {
     }
 
     private fun sendViberHistory(msgs: List<ViberReader.Msg>, phone: String) {
-        val lines = ArrayList<String>()
-        lines.add("<b>История диалога в Viber</b> (от ${phone})")
-        lines.add("Всего сообщений: ${msgs.size}")
-        lines.add("")
         val DATE_FMT = "yyyy-MM-dd HH:mm:ss"
         val sdf = java.text.SimpleDateFormat(DATE_FMT, java.util.Locale.ROOT).apply {
             timeZone = java.util.TimeZone.getTimeZone("UTC")
         }
+        val sb = StringBuilder()
+        sb.append("<b>История диалога в Viber</b> (от ${phone})\n")
+        sb.append("Всего сообщений: ${msgs.size}\n\n")
+
         for (m in msgs) {
             val dir = if (m.incoming) "⬅️" else "➡️"
-            lines.add("$dir <b>Viber</b> <code>${sdf.format(java.util.Date(m.ts))}</code>\n<i>${m.body.take(400)}</i>")
+            sb.append("$dir <b>Viber</b> <code>${sdf.format(java.util.Date(m.ts))}</code>\n")
+            val body = if (m.mime != 0 && m.body.startsWith("content://")) "" else m.body.take(400)
+            sb.append("<i>$body</i>\n")
+            // Media: attach the file inline with the line so images are visible.
+            if (m.mime != 0) {
+                val file = ViberReader.exportMedia(ctx, m.mediaUri, m.mediaFileName, m.mediaSize)
+                if (file != null) {
+                    val cap = "$dir Viber ${sdf.format(java.util.Date(m.ts))} от $phone\n<i>${m.body.take(400)}</i>"
+                    TelegramClient.sendFile(file, cap)
+                } else {
+                    sb.append("<i>медиа недоступно (mime=${m.mime})</i>\n")
+                }
+            }
+            sb.append("\n")
         }
-        var chunk = lines.joinToString("\n")
+
+        var chunk = sb.toString()
         while (chunk.isNotEmpty()) {
             val part = if (chunk.length > 3500) chunk.substring(0, 3500) else chunk
             TelegramClient.sendText(part)
