@@ -51,10 +51,7 @@ object TelegramClient {
     ): Boolean {
         val kb = JSONArray().apply {
             put(JSONArray().apply {
-                put(button("👤 Инфо", "viber_info:$chatId"))
                 put(button("📜 Прочитать весь диалог", "viber_read:$chatId"))
-            })
-            put(JSONArray().apply {
                 put(button("✏️ Ответить", "viber_reply:$chatId"))
             })
         }

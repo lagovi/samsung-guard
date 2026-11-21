@@ -70,9 +70,15 @@ object ViberApi {
 
     /** Contact card lookup by chat id (build v22+; null on older builds). */
     fun contactByChat(ctx: Context, chatId: Long): Contact? {
-        val arr = query(ctx, "$BASE/contact?chat_id=$chatId") ?: return null
-        val o = elements(arr).firstOrNull() ?: return null
-        return Contact(
+        val arr = query(ctx, "$BASE/contact?chat_id=$chatId") ?: run {
+            Log.i(TAG, "contact chat=$chatId: query returned null (older build?)")
+            return null
+        }
+        val o = elements(arr).firstOrNull() ?: run {
+            Log.i(TAG, "contact chat=$chatId: empty data")
+            return null
+        }
+        val c = Contact(
             id = o.optLong("id"),
             number = o.optString("number").takeIf { it.isNotEmpty() },
             displayName = o.optString("display_name").takeIf { it.isNotEmpty() },
@@ -81,6 +87,8 @@ object ViberApi {
             photoUri = o.optString("photo_uri").takeIf { it.isNotEmpty() },
             chatId = if (o.has("chat_id")) o.optLong("chat_id") else null,
         )
+        Log.i(TAG, "contact chat=$chatId -> id=${c.id} photo=${c.photoAvailable} uri=${c.photoUri}")
+        return c
     }
 
     /**

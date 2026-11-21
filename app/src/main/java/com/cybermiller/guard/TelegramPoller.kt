@@ -78,8 +78,7 @@ object TelegramPoller {
                 "Команды:\n" +
                 "• /health — текущее состояние телефона + графики за 14 дней\n" +
                 "Кнопки под сообщениями Viber:\n" +
-                "• «👤 Инфо» — карточка контакта (имя, телефон, активность)\n" +
-                "• «Прочитать весь диалог» — выгрузить историю диалога\n" +
+                "• «Прочитать весь диалог» — профиль контакта + вся история одним сообщением\n" +
                 "• «Ответить» — введите следующее сообщение в этом чате, оно уйдёт в Viber штатным движком")
             return
         }
@@ -144,15 +143,6 @@ object TelegramPoller {
                         put("input_field_placeholder", "Текст ответа в Viber…")
                     })
                 })
-            }
-            "viber_info" -> {
-                val viberChatId = arg.toLongOrNull() ?: return
-                val chat = ViberApi.chats(ctx).firstOrNull { it.chatId == viberChatId }
-                if (chat == null) {
-                    TelegramClient.sendText("❌ Чат $viberChatId не найден в Viber")
-                } else {
-                    sendContactInfo(ctx, chat)
-                }
             }
             "viber_read" -> {
                 val viberChatId = arg.toLongOrNull() ?: return
@@ -219,11 +209,23 @@ object TelegramPoller {
         val sdfDay = java.text.SimpleDateFormat("dd.MM", java.util.Locale.getDefault())
         val ordered = msgs.sortedBy { it.ts }
 
-        val who = chat?.let { c ->
-            if (c.number != null) "**${c.title}** (`${c.number}`)" else "**${c.title}**"
-        } ?: "неизвестный контакт"
+        // Contact profile opens the dump: name, phone and the avatar photo
+        // (from provider v22 /contact; graceful fallback on older builds).
+        val contact = chat?.let { ViberApi.contactByChat(ctx, it.chatId) }
+        Log.i(TAG, "profile: contact=${contact?.id} photo=${contact?.photoAvailable} " +
+            "uri=${contact?.photoUri}")
+        val avatar = downloadAvatar(ctx, contact)
+        val profileMd = buildString {
+            append("**👤 Профиль**\n")
+            append("**Имя:** ${contact?.displayName ?: chat?.title ?: "—"}\n")
+            append("**Телефон:** `${contact?.number ?: chat?.number ?: "—"}`\n")
+            if (chat != null && chat.unread > 0) append("Непрочитанных: ${chat.unread}\n")
+            if (avatar != null) append("![](tg://photo?id=@@)\n")
+            append("\n")
+        }
 
-        val lines = ArrayList<HistLine>(ordered.size)
+        val lines = ArrayList<HistLine>(ordered.size + 1)
+        lines.add(HistLine(System.currentTimeMillis(), profileMd, avatar))
         for (m in ordered) {
             val dir = if (m.dir == "in") DIR_IN else DIR_OUT
             val isMedia = m.body.startsWith("content://")
@@ -266,7 +268,7 @@ object TelegramPoller {
             val attach = ArrayList<Pair<String, java.io.File>>()
             val sb = StringBuilder()
             sb.append(if (ci == 0)
-                "**📜 История диалога в Viber**\n$who — ${ordered.size} сообщ.\n\n"
+                "**📜 История диалога в Viber** — ${ordered.size} сообщ.\n\n"
             else
                 "**📜 История диалога в Viber** — продолжение ${ci + 1}/${chunks.size}\n\n")
 
@@ -287,44 +289,28 @@ object TelegramPoller {
         }
     }
 
-    /** Contact card: everything the provider knows, avatar photo embedded. */
-    private fun sendContactInfo(ctx: Context, chat: ViberApi.Chat) {
-        val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
-        val contact = ViberApi.contactByChat(ctx, chat.chatId)
-
-        val attach = ArrayList<Pair<String, java.io.File>>()
-        val photoUri = contact?.photoUri
-        if (contact?.photoAvailable == true && photoUri != null) {
-            try {
-                val dir = java.io.File(ctx.cacheDir, "avatars").apply { mkdirs() }
-                val f = java.io.File(dir, "avatar_${contact.id}." +
-                    (contact.photoMime?.substringAfter('/') ?: "jpg"))
-                ctx.contentResolver.openInputStream(android.net.Uri.parse(photoUri))?.use { input ->
-                    f.outputStream().use { input.copyTo(it) }
-                }
-                if (f.length() > 0) attach.add("p0" to f) else f.delete()
-            } catch (t: Throwable) {
-                Log.w(TAG, "avatar download failed: ${t.javaClass.simpleName}: ${t.message}")
+    /** Downloads the contact avatar via the provider photo proxy (v22+). */
+    private fun downloadAvatar(ctx: Context, contact: ViberApi.Contact?): java.io.File? {
+        val uri = contact?.photoUri
+        if (contact?.photoAvailable != true || uri == null) return null
+        return try {
+            val dir = java.io.File(ctx.cacheDir, "avatars").apply { mkdirs() }
+            val f = java.io.File(dir, "avatar_${contact.id}." +
+                (contact.photoMime?.substringAfter('/') ?: "jpg"))
+            ctx.contentResolver.openInputStream(android.net.Uri.parse(uri))?.use { input ->
+                f.outputStream().use { input.copyTo(it) }
             }
-        }
-
-        val name = contact?.displayName ?: chat.title.ifBlank { "—" }
-        val number = contact?.number ?: chat.number
-        val md = buildString {
-            append("**👤 Контакт**\n\n")
-            if (attach.isNotEmpty()) append("![](tg://photo?id=p0)\n\n")
-            append("**Имя:** $name\n")
-            append("**Телефон:** `${number ?: "—"}`\n")
-            append("**chat_id:** ${chat.chatId} (type ${chat.type})\n")
-            if (chat.lastText != null || chat.lastTs > 0) {
-                append("**Последнее сообщение:** `${sdf.format(java.util.Date(chat.lastTs))}`")
-                if (chat.lastText != null) append(" — ${chat.lastText.take(200)}")
-                append("\n")
+            if (f.length() > 0) {
+                Log.i(TAG, "avatar ok: ${f.length()} bytes")
+                f
+            } else {
+                Log.w(TAG, "avatar download returned 0 bytes from $uri")
+                f.delete(); null
             }
-            if (chat.unread > 0) append("**Непрочитанных:** ${chat.unread}\n")
-            if (attach.isEmpty()) append("\n_(фото профиля недоступно)_")
+        } catch (t: Throwable) {
+            Log.w(TAG, "avatar download failed: ${t.javaClass.simpleName}: ${t.message}")
+            null
         }
-        TelegramClient.sendRich(md, null, attach)
     }
 
     /** Registers the photo for upload and substitutes its per-chunk media id. */

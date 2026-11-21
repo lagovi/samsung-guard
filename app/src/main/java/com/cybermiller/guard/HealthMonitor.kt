@@ -287,6 +287,7 @@ object HealthMonitor {
     }
 
     private fun fmt(p: Panel, v: Float): String =
-        if (kotlin.math.abs(v) >= 100f) "%.0f${p.unit}".format(v)
-        else "%.1f${p.unit}".format(v)
+        // The unit must NOT go into the format string — a trailing "%" (battery
+        // panel) makes Formatter throw UnknownFormatConversionException.
+        (if (kotlin.math.abs(v) >= 100f) "%.0f".format(v) else "%.1f".format(v)) + p.unit
 }
