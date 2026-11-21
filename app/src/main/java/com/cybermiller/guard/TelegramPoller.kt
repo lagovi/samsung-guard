@@ -176,11 +176,12 @@ object TelegramPoller {
 
     /**
      * Uploads the whole conversation as rich messages in chronological order.
-     * Photos are embedded in the message body (tg://photo?id=) instead of being
-     * sent as separate documents; internal Viber content:// URIs never surface.
+     * Photos are embedded in the message body (tg://photo?id=) at their place
+     * in the dialogue; internal Viber content:// URIs never surface.
      *
-     * Messages are packed into batches (≤ 10 photos) so a long history does not
-     * turn into one Telegram post per message.
+     * Everything fits into ONE message until a hard API limit is hit:
+     * 32768 chars of text or 50 media attachments per rich message. Those are
+     * the only reasons to split — never the text/media alternation.
      */
     private fun sendViberHistory(ctx: Context, msgs: List<ViberApi.Msg>, phone: String) {
         val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
@@ -209,28 +210,25 @@ object TelegramPoller {
             if (isMedia) {
                 val file = ViberReader.exportMedia(ctx, m)
                 if (file != null) {
-                    // Batch cap: 10 photos per rich message.
-                    if (attach.size >= 10) flush()
+                    if (attach.size >= 50) flush()   // API cap: 50 media per message
                     val id = "m${attach.size}"
                     attach.add(id to file)
                     chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts))).append("` ")
                     if (text.isNotBlank()) chunk.append(text.take(300)).append(" ")
                     chunk.append("![](tg://photo?id=$id)\n\n")
                 } else {
-                    if (attach.isNotEmpty()) flush()
                     chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts)))
                         .append("` _(медиа недоступно)_")
                     if (text.isNotBlank()) chunk.append("\n").append(text.take(300))
                     chunk.append("\n\n")
                 }
             } else {
-                if (attach.isNotEmpty()) flush()
                 chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts))).append("` ")
                 chunk.append(if (text.isNotBlank()) text.take(800) else "_(пусто)_")
                 chunk.append("\n\n")
             }
 
-            if (chunk.length > 28_000) flush()   // rich message limit is 32768 chars
+            if (chunk.length > 30_000) flush()   // API cap: 32768 chars; leave margin
         }
         flush()
     }
