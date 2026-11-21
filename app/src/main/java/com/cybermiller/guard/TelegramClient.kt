@@ -8,8 +8,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 object TelegramClient {
-    private const val TOKEN = "REDACTED-ROTATED-TOKEN"
-    private const val CHAT = "000000000"
+    // Injected from gitignored sources (local.properties / CI env) — never hardcode.
+    private val TOKEN = BuildConfig.TELEGRAM_BOT_TOKEN
+    private val CHAT = BuildConfig.TELEGRAM_CHAT_ID
 
     fun sendSmsAlert(ctx: Context, smsId: Long, address: String, body: String, v: Verdict) {
         val icon = when (v.severity) {
@@ -44,7 +45,7 @@ object TelegramClient {
      *  `![](tg://photo?id=mN)`, with `attach` holding the matching (mN, file) pairs. */
     fun sendViberAlert(
         ctx: Context,
-        conversationId: Long,
+        chatId: Long,
         phone: String,
         body: String,
         attach: List<Pair<String, java.io.File>> = emptyList()
@@ -52,10 +53,10 @@ object TelegramClient {
         val kb = JSONArray().apply {
             put(JSONArray().apply {
                 put(button("💬 Открыть в Viber", "viber_open:$phone"))
-                put(button("📜 Прочитать весь диалог", "viber_read:$conversationId"))
+                put(button("📜 Прочитать весь диалог", "viber_read:$chatId"))
             })
             put(JSONArray().apply {
-                put(button("✏️ Ответить", "viber_reply:$phone"))
+                put(button("✏️ Ответить", "viber_reply:$chatId"))
             })
         }
         sendRich(body, kb, attach)

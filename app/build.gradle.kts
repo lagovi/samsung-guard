@@ -13,18 +13,42 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+
+        // Secrets are injected from gitignored sources only (audit 2026-11-21):
+        // locally from local.properties, in CI from GitHub Actions env/secret.
+        fun secret(name: String): String {
+            val local = rootDir.resolve("local.properties").takeIf { it.isFile }
+                ?.inputStream()?.use { p -> java.util.Properties().apply { load(p) } }
+            return System.getenv(name)
+                ?: local?.getProperty(name)
+                ?: ""
+        }
+        fun field(name: String): String =
+            "\"" + (secret(name)).replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+        buildConfigField("String", "TELEGRAM_BOT_TOKEN", field("TELEGRAM_BOT_TOKEN"))
+        buildConfigField("String", "TELEGRAM_CHAT_ID", field("TELEGRAM_CHAT_ID"))
+        buildConfigField("String", "VIBER_OWNER_PHONE", field("VIBER_OWNER_PHONE"))
+        buildConfigField("String", "LLM_API_KEY", field("LLM_API_KEY"))
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     signingConfigs {
-        // Committed throwaway debug key: keeps every CI artifact installable
-        // over the previous one (same signature).
+        // Same debug key as the custom Viber "api" build (uber-apk-signer's
+        // bundled debug.keystore, CN=Android Debug). Viber's LiteAPI provider
+        // only accepts packages signed with that key — this is what lets Guard
+        // call content://com.viber.voip.liteapi directly, no root needed.
+        // The keystore is NOT committed (audit 2026-11-21 policy: *.keystore is
+        // gitignored); CI extracts it from the pinned official uber-apk-signer
+        // jar (see .github/workflows/build.yml). Locally point
+        // ANDROID_DEBUG_KEYSTORE at a copy of the same file.
         getByName("debug") {
-            // Committed throwaway debug key — same signature on every build, so
-            // each artifact installs over the previous one. Override with
-            // ANDROID_DEBUG_KEYSTORE for a locally generated key.
             storeFile = file(System.getenv("ANDROID_DEBUG_KEYSTORE")
-               ?.takeIf { it.isNotBlank() }
-                ?: "${rootDir}/keystore/debug.keystore")
+                ?.takeIf { it.isNotBlank() }
+                ?: "${rootDir}/keystore/uber-debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"

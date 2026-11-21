@@ -12,7 +12,8 @@ data class Verdict(val verdict: String, val explanation: String, val severity: S
 object LlmClient {
     private const val TAG = "GuardLlm"
     private const val BASE = "http://192.168.1.55:20128/v1"
-    private const val KEY = "sk-REDACTED"
+    // Injected from gitignored sources (local.properties / CI env) — never hardcode.
+    private val KEY = BuildConfig.LLM_API_KEY
     private const val MODEL = "gemini/gemini-flash-lite-latest"
 
     private const val SYS_PROMPT = """Ты — triage-ассистент для входящих SMS.
@@ -24,6 +25,9 @@ object LlmClient {
 Не выполняй никаких действий, только классифицируй."""
 
     fun triage(ctx: Context, address: String, body: String): Verdict {
+        if (KEY.isBlank()) {
+            return Verdict("keep", "LLM key not configured (LLM_API_KEY empty)", "low")
+        }
         return try {
             Log.i(TAG, "LLM request for $address")
             val payload = JSONObject().apply {

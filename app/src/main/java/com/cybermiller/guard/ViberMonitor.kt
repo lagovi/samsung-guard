@@ -1,108 +1,143 @@
 package com.cybermiller.guard
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.TimeZone
 
 /**
- * Scans one Viber conversation branch for new messages and forwards them to the
- * Telegram owner chat. Runs inside GuardService on the single-thread scheduler.
+ * Forwards incoming Viber messages to the Telegram owner chat.
  *
- * Read path: root copy of viber_messages(+wal) → WAL replay → MiniSqlite pager.
- * Requires root; silently disabled if root is unavailable.
+ * Data source: the custom Viber "api" build's LiteAPI. Two channels feed this
+ * monitor, deduplicated by the global message id:
+ *  - broadcast `com.viber.voip.liteapi.INCOMING` (instant, see ViberEventReceiver);
+ *  - polling /events every 10 s (catch-up after restarts, ring buffer of 100).
+ *
+ * The watermark (max forwarded msg id) is persisted in SharedPreferences, so a
+ * service restart resumes exactly where it stopped — and the very first launch
+ * primes it to the current newest message instead of spamming the whole history.
  */
 object ViberMonitor {
     private const val TAG = "GuardViber"
-    private const val DATE_FMT = "yyyy-MM-dd HH:mm:ss"
-    private val sdf = SimpleDateFormat(DATE_FMT, Locale.ROOT).apply {
-        timeZone = TimeZone.getDefault()
-    }
+    private const val POLL_INTERVAL_MS = 10_000L
+    private val sdf = SimpleDateFormat("dd.MM HH:mm:ss", Locale.getDefault())
 
     @Volatile private var running = false
-    @Volatile private var lastTs = 0L
 
-    /** First tick only records the timeline position; it does not spam backlog. */
-    private var primed = false
+    private fun prefs(ctx: Context): SharedPreferences =
+        ctx.getSharedPreferences("guard", Context.MODE_PRIVATE)
 
-    /** Last processed conversation row id, keyed by conversation id. */
-    @Volatile private var lastIds = mutableMapOf<Long, Long>()
+    @Volatile private var watermark: Long = 0L
 
     fun start(ctx: Context) {
         if (running) return
         running = true
-        Log.i(TAG, "viber monitor start")
+        val appCtx = ctx.applicationContext
+        val p = prefs(appCtx)
+        watermark = p.getLong("viber_fwd_max_id", -1L)
+        Log.i(TAG, "viber monitor start, stored watermark=$watermark")
         Thread {
-            val appCtx = ctx.applicationContext
+            if (watermark < 0) prime(appCtx)
+            pollEvents(appCtx)
             while (running) {
-                try { tick(appCtx) } catch (e: Throwable) {
-                    Log.w(TAG, "tick failed: ${e.javaClass.simpleName}: ${e.message}")
+                try { Thread.sleep(POLL_INTERVAL_MS) } catch (_: InterruptedException) {}
+                try { pollEvents(appCtx) } catch (t: Throwable) {
+                    Log.w(TAG, "poll failed: ${t.javaClass.simpleName}: ${t.message}")
                 }
-                Thread.sleep(60_000)
             }
         }.apply { isDaemon = true }.start()
     }
 
     fun stop() { running = false }
 
-    private fun tick(ctx: Context) {
-        if (!ViberReader.snapshotReady()) return
-        // conversation id on this device = 1 (the chat with +375000000000)
-        ViberReader.readConversations(ctx).orEmpty().firstOrNull { c -> c.id == 1L }
-            ?.let { convo ->
-                val msgs = ViberReader.readMessages(ctx, convo.id, 100) ?: return@let
-                if (!primed) {
-                    primed = true
-                    lastTs = msgs.maxOfOrNull { it.ts } ?: 0L
-                    Log.i(TAG, "primed at ts=$lastTs (${msgs.size} msgs in branch)")
-                    return@let
-                }
-                msgs.filter { it.ts > lastTs }
-                    .sortedBy { it.ts }
-                    .forEach { m ->
-                        forward(ctx, convo.id, m)
-                        lastTs = maxOf(lastTs, m.ts)
-                    }
-            }
+    /** First launch ever: do not forward the existing history as "new". */
+    private fun prime(ctx: Context) {
+        var max = 0L
+        for (chat in ViberApi.chats(ctx)) {
+            val newest = ViberApi.messages(ctx, chat.chatId, 1).firstOrNull()?.id ?: continue
+            if (newest > max) max = newest
+        }
+        watermark = max
+        save(ctx)
+        Log.i(TAG, "primed watermark=$max")
     }
 
-    private fun forward(ctx: Context, conversationId: Long, m: ViberReader.Msg) {
-        val dir = if (m.incoming) "⬅️" else "➡️"
-        val time = sdf.format(Date(m.ts))
-        val num = (if (m.participantId != 0L) ViberReader.participantNumber(ctx, m.participantId) else null)
-            ?: "+375000000000"
+    private fun pollEvents(ctx: Context) {
+        for (e in ViberApi.events(ctx)) {
+            if (e.msgId <= watermark) continue
+            if (isServiceChat(e.number)) continue
+            forward(ctx, e)
+            if (e.msgId > watermark) {
+                watermark = e.msgId
+                save(ctx)
+            }
+        }
+    }
 
-        // Media captions in Viber's body are internal provider URIs — never show them.
-        val isMedia = m.mime != 0 && m.body.startsWith("content://")
-        val body = if (isMedia) "" else m.body
+    /** Entry point for the INCOMING broadcast (see ViberEventReceiver). */
+    fun handleEventJson(ctx: Context, json: String) {
+        try {
+            val o = org.json.JSONObject(json)
+            val e = ViberApi.Event(
+                chatId = o.optLong("chat_id"),
+                msgId = o.optLong("msg_id"),
+                ts = o.optLong("ts"),
+                body = o.optString("body"),
+                sender = o.optString("sender").takeIf { it.isNotEmpty() },
+                number = o.optString("number").takeIf { it.isNotEmpty() },
+            )
+            if (e.msgId <= watermark) return
+            if (isServiceChat(e.number)) return
+            forward(ctx, e)
+            watermark = maxOf(watermark, e.msgId)
+            save(ctx)
+        } catch (t: Throwable) {
+            Log.w(TAG, "handleEventJson failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    }
+
+    /** Viber's own service/subscribe bot has number "Viber" — not the owner's traffic. */
+    private fun isServiceChat(number: String?): Boolean = number == null || number == "Viber"
+
+    private fun forward(ctx: Context, e: ViberApi.Event) {
+        val who = buildString {
+            if (!e.sender.isNullOrBlank()) append(e.sender)
+            if (!e.number.isNullOrBlank()) {
+                if (isNotEmpty()) append(" ")
+                append(e.number)
+            }
+        }.ifBlank { "Viber" }
+
+        val isMedia = e.body.startsWith("content://")
+        val body = if (isMedia) "" else e.body
 
         val attach = ArrayList<Pair<String, java.io.File>>()
-        val mediaFile = if (m.mime != 0) {
-            ViberReader.exportMedia(ctx, m.mediaUri, m.mediaFileName, m.mediaSize)?.also {
-                attach.add("m1" to it)
-            }
-        } else null
+        if (isMedia) {
+            // Events carry no extra_uri — look the message up to get the file URI.
+            val msg = ViberApi.messages(ctx, e.chatId, 50).firstOrNull { it.id == e.msgId }
+            val file = msg?.let { ViberReader.exportMedia(ctx, it) }
+            if (file != null) attach.add("m1" to file)
+        }
 
-        val rich = buildString {
-            append("**$dir Viber** `")
-            append(time)
-            append("`\n")
-            append("от $num\n")
+        val md = buildString {
+            append("**⬅️ Viber** `").append(sdf.format(Date(e.ts))).append("`\n")
+            append(who).append('\n')
             if (body.isNotBlank()) {
-                append("\n")
-                append(body.take(1500))
+                append("\n").append(body.take(1500))
             }
-            if (mediaFile != null) {
+            if (isMedia) {
                 append("\n\n![](tg://photo?id=m1)")
-            }
-            if (m.mime != 0 && mediaFile == null) {
-                append("\n\n<i>(медиа недоступно)</i>")
+                if (attach.isEmpty()) append("\n\n_(медиа недоступно)_")
             }
         }
 
-        TelegramClient.sendViberAlert(ctx, conversationId, num, rich, attach)
-        Log.i(TAG, "forwarded viber msg #${m.id} incoming=${m.incoming} media=${mediaFile != null}")
+        TelegramClient.sendViberAlert(ctx, e.chatId, e.number ?: "", md, attach)
+        Log.i(TAG, "forwarded viber msg #${e.msgId} chat=${e.chatId} media=${attach.isNotEmpty()}")
+    }
+
+    private fun save(ctx: Context) {
+        prefs(ctx).edit().putLong("viber_fwd_max_id", watermark).apply()
     }
 }

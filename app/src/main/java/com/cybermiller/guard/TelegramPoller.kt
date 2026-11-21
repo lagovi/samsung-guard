@@ -11,20 +11,17 @@ import java.net.URL
  * applies owner's decision to the stored SMS. Runs in GuardService thread.
  */
 object TelegramPoller {
-    private const val TOKEN = "REDACTED-ROTATED-TOKEN"
-    private const val CHAT = "000000000"
+    // Injected from gitignored sources (local.properties / CI env) — never hardcode.
+    private val TOKEN = BuildConfig.TELEGRAM_BOT_TOKEN
+    private val CHAT = BuildConfig.TELEGRAM_CHAT_ID
     private const val TAG = "GuardPoller"
     @Volatile private var running = false
     private var offset = 0L
 
-    /** chat_id -> phone number awaiting an owner reply typed in Telegram. */
-    @Volatile private var awaitingReply = mutableMapOf<Long, String>()
+    /** tg chat id -> Viber chat id awaiting an owner reply typed in Telegram. */
+    @Volatile private var awaitingReply = mutableMapOf<Long, Long>()
 
-    /** Sets the phone number the next owner message in `chat` will be sent to in Viber. */
-    fun awaitReply(chatId: Long, phone: String) {
-        awaitingReply[chatId] = phone
-        Log.i(TAG, "awaiting reply in chat $chatId -> $phone")
-    }
+    private fun ownerChatId(): Long? = CHAT.toLongOrNull()
 
     fun start(ctx: Context) {
         if (running) return
@@ -59,7 +56,7 @@ object TelegramPoller {
             offset = upd.optLong("update_id", offset) + 1
             val chatId = upd.optJSONObject("message")?.optJSONObject("chat")?.optLong("id")
                 ?: upd.optJSONObject("callback_query")?.optJSONObject("message")?.optJSONObject("chat")?.optLong("id")
-            if (chatId != CHAT.toLong()) continue
+            if (chatId != ownerChatId()) continue
             val cb = upd.optJSONObject("callback_query")
             if (cb != null) {
                 handleCallback(ctx, cb)
@@ -70,29 +67,27 @@ object TelegramPoller {
     }
 
     /** Routes a plain message from the owner. If chat is awaiting a Viber reply,
-     *  forwards the typed text into Viber; otherwise ignores it. */
+     *  forwards the typed text into Viber through the LiteAPI; otherwise ignores it. */
     private fun handleOwnerMessage(ctx: Context, upd: JSONObject) {
         val msg = upd.optJSONObject("message") ?: return
         val chatId = msg.optJSONObject("chat")?.optLong("id", 0L) ?: return
-        if (chatId != CHAT.toLong()) return
+        if (chatId != ownerChatId()) return
         val text = msg.optString("text", "")
         if (text.startsWith("/start")) {
             TelegramClient.sendText("🛡 Guard бот.\n" +
                 "Команды: /start — эта справка.\n" +
                 "Кнопки под сообщениями Viber:\n" +
                 "• «Открыть в Viber» — открыть чат в приложении Viber\n" +
-                "• «Прочитать весь диалог» — выгрузить всю историю из БД Viber\n" +
-                "• «Ответить» — введите следующее сообщение в этом чате, оно отправится в Viber от вашего номера")
+                "• «Прочитать весь диалог» — выгрузить историю диалога\n" +
+                "• «Ответить» — введите следующее сообщение в этом чате, оно уйдёт в Viber штатным движком")
             return
         }
-        val phone = awaitingReply.remove(chatId) ?: return
+        val viberChatId = awaitingReply.remove(chatId) ?: return
         if (text.isBlank()) return
-        try {
-            ViberSender.sendReply(ctx, phone, text)
-            TelegramClient.sendText("✅ Ответ отправлен в Viber ($phone):\n<i>${text.take(400)}</i>")
-        } catch (e: Throwable) {
-            TelegramClient.sendText("❌ Не удалось отправить ответ в Viber: ${e.message}")
-            Log.w(TAG, "sendReply failed", e)
+        if (ViberApi.send(ctx, viberChatId, text)) {
+            TelegramClient.sendText("✅ Ответ ушёл в Viber (чат $viberChatId):\n<i>${text.take(400)}</i>")
+        } else {
+            TelegramClient.sendText("❌ Не удалось отправить ответ в Viber (чат $viberChatId)")
         }
     }
 
@@ -126,15 +121,16 @@ object TelegramPoller {
                 Log.i(TAG, "opened viber chat $arg")
             }
             "viber_reply" -> {
-                awaitingReply[CHAT.toLong()] = arg
-                Log.i(TAG, "awaiting reply from owner -> $arg")
+                val viberChatId = arg.toLongOrNull() ?: return
+                awaitingReply[ownerChatId() ?: 0L] = viberChatId
+                val title = ViberApi.chats(ctx).firstOrNull { it.chatId == viberChatId }
+                    ?.let { it.title + (it.number?.let { n -> " ($n)" } ?: "") } ?: "чат $viberChatId"
+                Log.i(TAG, "awaiting reply from owner -> viber chat $viberChatId")
                 // ForceReply binds the owner's next message to this prompt, so the
-                // reply is unambiguous even if other chat traffic arrives. The phone
-                // number travels in the quoted prompt text, so state also survives
-                // a service restart.
+                // reply is unambiguous even if other chat traffic arrives.
                 post("sendMessage", JSONObject().apply {
                     put("chat_id", CHAT)
-                    put("text", "✏️ Ответ в Viber для <code>$arg</code>\n" +
+                    put("text", "✏️ Ответ в Viber для <b>$title</b>\n" +
                         "Отправьте текст ответа следующим сообщением.")
                     put("parse_mode", "HTML")
                     put("reply_markup", JSONObject().apply {
@@ -144,14 +140,16 @@ object TelegramPoller {
                 })
             }
             "viber_read" -> {
-                val conversationId = arg.toLongOrNull() ?: return
-                ViberReader.readAllMessages(ctx, conversationId)?.let { msgs ->
-                    val phone = ViberReader.participantNumber(ctx, 2L) ?: "?"
-                    sendViberHistory(ctx, msgs, phone)
-                } ?: run {
+                val viberChatId = arg.toLongOrNull() ?: return
+                val msgs = readHistory(ctx, viberChatId)
+                if (msgs.isEmpty()) {
                     TelegramClient.sendText("❌ Не удалось прочитать историю диалога")
+                } else {
+                    val phone = ViberApi.chats(ctx).firstOrNull { it.chatId == viberChatId }
+                        ?.number ?: "?"
+                    sendViberHistory(ctx, msgs, phone)
                 }
-                Log.i(TAG, "read all messages for conv $conversationId")
+                Log.i(TAG, "read history for viber chat $viberChatId: ${msgs.size} msgs")
             }
             else -> Log.w(TAG, "callback unknown action: $action")
         }
@@ -162,22 +160,35 @@ object TelegramPoller {
         }
     }
 
+    /** Full history of a chat via /messages paging (before_id), oldest last. */
+    private fun readHistory(ctx: Context, chatId: Long, cap: Int = 500): List<ViberApi.Msg> {
+        val out = ArrayList<ViberApi.Msg>()
+        var before: Long? = null
+        while (out.size < cap) {
+            val page = ViberApi.messages(ctx, chatId, 200, before)
+            if (page.isEmpty()) break
+            out.addAll(page)
+            before = page.last().id
+            if (page.size < 200) break
+        }
+        return out.reversed() // oldest first
+    }
+
     /**
      * Uploads the whole conversation as rich messages in chronological order.
      * Photos are embedded in the message body (tg://photo?id=) instead of being
      * sent as separate documents; internal Viber content:// URIs never surface.
      *
-     * Messages are packed into batches (≤ 10 photos) so a 100-message history
-     * does not turn into 100 separate Telegram posts.
+     * Messages are packed into batches (≤ 10 photos) so a long history does not
+     * turn into one Telegram post per message.
      */
-    private fun sendViberHistory(ctx: Context, msgs: List<ViberReader.Msg>, phone: String) {
-        val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.ROOT)
+    private fun sendViberHistory(ctx: Context, msgs: List<ViberApi.Msg>, phone: String) {
+        val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
         val ordered = msgs.sortedBy { it.ts }
 
         val header = "**📜 История диалога в Viber**\nс `$phone` — ${ordered.size} сообщ.\n\n"
         var chunk = StringBuilder(header)
         var attach = ArrayList<Pair<String, java.io.File>>()
-        var marked = false
 
         fun flush() {
             if (chunk.isBlank()) return
@@ -191,12 +202,12 @@ object TelegramPoller {
         }
 
         for (m in ordered) {
-            val dir = if (m.incoming) "⬅️" else "➡️"
-            val isMedia = m.mime != 0
-            val text = if (isMedia && m.body.startsWith("content://")) "" else m.body
+            val dir = if (m.dir == "in") "⬅️" else "➡️"
+            val isMedia = m.body.startsWith("content://")
+            val text = if (isMedia) "" else m.body
 
             if (isMedia) {
-                val file = ViberReader.exportMedia(ctx, m.mediaUri, m.mediaFileName, m.mediaSize)
+                val file = ViberReader.exportMedia(ctx, m)
                 if (file != null) {
                     // Batch cap: 10 photos per rich message.
                     if (attach.size >= 10) flush()
@@ -220,9 +231,8 @@ object TelegramPoller {
             }
 
             if (chunk.length > 28_000) flush()   // rich message limit is 32768 chars
-            marked = true
         }
-        if (marked) flush()
+        flush()
     }
 
     private fun answerCallback(cbId: String, text: String) {

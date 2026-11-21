@@ -55,5 +55,17 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- Incoming Viber events from the custom "api" build. Only senders
+             holding Viber's signature permission can deliver (i.e. Viber itself). -->
+        <receiver
+            android:name=".ViberEventReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="com.viber.voip.permission.LITEAPI">
+            <intent-filter>
+                <action android:name="com.viber.voip.liteapi.INCOMING" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

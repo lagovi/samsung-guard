@@ -36,7 +36,7 @@ class MainActivity : AppCompatActivity() {
         }
         val viberBtn = findViewById<Button>(R.id.viberBtn)
         viberBtn.setOnClickListener {
-            ViberSender.openChat(this, "+375000000000")
+            ViberSender.openChat(this, BuildConfig.VIBER_OWNER_PHONE)
         }
 
         statusText.text = getString(R.string.status_stopped)

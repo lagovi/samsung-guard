@@ -22,7 +22,6 @@ class GuardService : Service() {
 
         TelegramPoller.start(this)
         CallMonitor.start(this)
-        ViberReader.init(this)
         ViberMonitor.start(this)
 
         scheduler = Executors.newSingleThreadScheduledExecutor().apply {

@@ -1,0 +1,189 @@
+package com.cybermiller.guard
+
+import android.content.Context
+import android.os.Bundle
+import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Client for the internal LiteAPI of the custom Viber "api" build
+ * (ContentProvider `com.viber.voip.liteapi`).
+ *
+ * Access rule of that provider: the calling package must be signed with the
+ * same debug key as the Viber build (uber-apk-signer debug key) — Guard is
+ * signed with exactly that key, so no root is involved here. root/shell uid
+ * also have access, which is what makes `adb shell content …` work for
+ * debugging.
+ *
+ * Every response is one cursor row in the `json` column, envelope:
+ *   {"ok":true,"data":[...]}   or   {"ok":false,"error":"..."}
+ */
+object ViberApi {
+    private const val TAG = "GuardViberApi"
+    private const val BASE = "content://com.viber.voip.liteapi"
+
+    /** Chat list item from /chats. */
+    data class Chat(
+        val chatId: Long,
+        val type: Int,        // 0 = personal (has number), 6 = channel/notes
+        val title: String,
+        val number: String?,  // peer phone for personal chats
+        val lastTs: Long,
+        val lastText: String?,
+        val lastDir: String?, // "in"/"out"
+        val unread: Int,
+    )
+
+    /** Message from /messages. */
+    data class Msg(
+        val id: Long,
+        val dir: String,      // "in"/"out"
+        val status: Int,      // 1 = in flight, 2 = delivered
+        val ts: Long,
+        val body: String,     // text; for media a thumbnail content-URI
+        val sender: String?,
+        val senderNumber: String?,
+        val extraUri: String?,// full media location (often a MediaStore URI)
+    )
+
+    /** Incoming event from /events or the INCOMING broadcast. */
+    data class Event(
+        val chatId: Long,
+        val msgId: Long,
+        val ts: Long,
+        val body: String,
+        val sender: String?,
+        val number: String?,
+    )
+
+    private fun query(ctx: Context, uri: String): JSONArray? {
+        return try {
+            ctx.contentResolver.query(android.net.Uri.parse(uri), arrayOf("json"), null, null, null)
+                ?.use { c ->
+                    if (!c.moveToFirst()) return null
+                    val env = JSONObject(c.getString(c.getColumnIndexOrThrow("json")))
+                    if (!env.optBoolean("ok", false)) {
+                        Log.w(TAG, "$uri -> error: ${env.optString("error")}")
+                        return null
+                    }
+                    env.optJSONArray("data")
+                }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "provider rejected us (signature mismatch?): ${e.message}")
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "query $uri failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    private fun call(ctx: Context, method: String, arg: String?, extras: Bundle): JSONObject? {
+        return try {
+            val b = ctx.contentResolver.call(android.net.Uri.parse("$BASE/chats"), method, arg, extras)
+                ?: return null
+            val env = JSONObject(b.getString("json"))
+            if (!env.optBoolean("ok", false)) {
+                Log.w(TAG, "call $method -> error: ${env.optString("error")}")
+            }
+            env
+        } catch (e: SecurityException) {
+            Log.w(TAG, "call $method rejected (signature mismatch?): ${e.message}")
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "call $method failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    /** Provider liveness check; also warms the Viber process up. */
+    fun ping(ctx: Context): Boolean {
+        val env = call(ctx, "ping", null, Bundle()) ?: return false
+        return env.optBoolean("ok", false)
+    }
+
+    fun chats(ctx: Context, limit: Int = 100): List<Chat> {
+        val arr = query(ctx, "$BASE/chats?limit=$limit") ?: return emptyList()
+        val out = ArrayList<Chat>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            out.add(Chat(
+                chatId = o.optLong("chat_id"),
+                type = o.optInt("type"),
+                title = o.optString("title"),
+                number = o.optString("number").takeIf { it.isNotEmpty() },
+                lastTs = o.optLong("last_ts"),
+                lastText = o.optString("last_text").takeIf { it.isNotEmpty() },
+                lastDir = o.optString("last_dir").takeIf { it.isNotEmpty() },
+                unread = o.optInt("unread"),
+            ))
+        }
+        return out
+    }
+
+    /** Messages of a chat, newest first. */
+    fun messages(ctx: Context, chatId: Long, limit: Int = 200, beforeId: Long? = null): List<Msg> {
+        val sb = StringBuilder("$BASE/messages?chat_id=$chatId&limit=$limit")
+        if (beforeId != null) sb.append("&before_id=$beforeId")
+        val arr = query(ctx, sb.toString()) ?: return emptyList()
+        val out = ArrayList<Msg>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            out.add(Msg(
+                id = o.optLong("id"),
+                dir = o.optString("dir"),
+                status = o.optInt("status"),
+                ts = o.optLong("ts"),
+                body = o.optString("body"),
+                sender = o.optString("sender").takeIf { it.isNotEmpty() },
+                senderNumber = o.optString("sender_number").takeIf { it.isNotEmpty() },
+                extraUri = o.optString("extra_uri").takeIf { it.isNotEmpty() },
+            ))
+        }
+        return out
+    }
+
+    /** Last ≤100 incoming events (ring buffer inside the Viber process). */
+    fun events(ctx: Context): List<Event> {
+        val arr = query(ctx, "$BASE/events") ?: return emptyList()
+        val out = ArrayList<Event>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            out.add(Event(
+                chatId = o.optLong("chat_id"),
+                msgId = o.optLong("msg_id"),
+                ts = o.optLong("ts"),
+                body = o.optString("body"),
+                sender = o.optString("sender").takeIf { it.isNotEmpty() },
+                number = o.optString("number").takeIf { it.isNotEmpty() },
+            ))
+        }
+        return out
+    }
+
+    /**
+     * Sends `text` into chat `chatId` through Viber's own message engine.
+     * Returns true when the provider queued it. The provider may answer
+     * "app not initialized yet" right after the Viber process was woken —
+     * retried a few times here.
+     */
+    fun send(ctx: Context, chatId: Long, text: String): Boolean {
+        val extras = Bundle().apply { putString("text", text) }
+        for (attempt in 1..3) {
+            val env = call(ctx, "send", chatId.toString(), extras)
+            if (env?.optBoolean("ok", false) == true && env.optBoolean("queued")) {
+                Log.i(TAG, "send -> chat $chatId queued (${text.length} chars)")
+                return true
+            }
+            val err = env?.optString("error") ?: "no answer"
+            Log.w(TAG, "send attempt $attempt failed: $err")
+            if ("not initialized" !in err) break
+            try { Thread.sleep(4000L * attempt) } catch (_: InterruptedException) {}
+        }
+        return false
+    }
+
+    /** Resolves the personal chat id for a phone number (e.g. "+37529…"). */
+    fun chatIdByNumber(ctx: Context, number: String): Long? =
+        chats(ctx).firstOrNull { it.number == number }?.chatId
+}
