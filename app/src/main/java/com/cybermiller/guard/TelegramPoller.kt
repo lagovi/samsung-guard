@@ -77,7 +77,7 @@ object TelegramPoller {
             TelegramClient.sendText("🛡 Guard бот.\n" +
                 "Команды: /start — эта справка.\n" +
                 "Кнопки под сообщениями Viber:\n" +
-                "• «Открыть в Viber» — открыть чат в приложении Viber\n" +
+                "• «👤 Инфо» — карточка контакта (имя, телефон, активность)\n" +
                 "• «Прочитать весь диалог» — выгрузить историю диалога\n" +
                 "• «Ответить» — введите следующее сообщение в этом чате, оно уйдёт в Viber штатным движком")
             return
@@ -116,10 +116,6 @@ object TelegramPoller {
                 ViberSender.openChat(ctx, arg)
                 Log.i(TAG, "opened viber chat $arg")
             }
-            "viber_open" -> {
-                ViberSender.openChat(ctx, arg)
-                Log.i(TAG, "opened viber chat $arg")
-            }
             "viber_reply" -> {
                 val viberChatId = arg.toLongOrNull() ?: return
                 awaitingReply[ownerChatId() ?: 0L] = viberChatId
@@ -139,15 +135,23 @@ object TelegramPoller {
                     })
                 })
             }
+            "viber_info" -> {
+                val viberChatId = arg.toLongOrNull() ?: return
+                val chat = ViberApi.chats(ctx).firstOrNull { it.chatId == viberChatId }
+                if (chat == null) {
+                    TelegramClient.sendText("❌ Чат $viberChatId не найден в Viber")
+                } else {
+                    sendContactInfo(chat)
+                }
+            }
             "viber_read" -> {
                 val viberChatId = arg.toLongOrNull() ?: return
                 val msgs = readHistory(ctx, viberChatId)
                 if (msgs.isEmpty()) {
                     TelegramClient.sendText("❌ Не удалось прочитать историю диалога")
                 } else {
-                    val phone = ViberApi.chats(ctx).firstOrNull { it.chatId == viberChatId }
-                        ?.number ?: "?"
-                    sendViberHistory(ctx, msgs, phone)
+                    val chat = ViberApi.chats(ctx).firstOrNull { it.chatId == viberChatId }
+                    sendViberHistory(ctx, msgs, chat)
                 }
                 Log.i(TAG, "read history for viber chat $viberChatId: ${msgs.size} msgs")
             }
@@ -200,10 +204,14 @@ object TelegramPoller {
      * [HIST_VISIBLE_TAIL] messages stay visible. A dialog bigger than the caps
      * splits into several messages, oldest first, each with its own spoiler.
      */
-    private fun sendViberHistory(ctx: Context, msgs: List<ViberApi.Msg>, phone: String) {
+    private fun sendViberHistory(ctx: Context, msgs: List<ViberApi.Msg>, chat: ViberApi.Chat?) {
         val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
         val sdfDay = java.text.SimpleDateFormat("dd.MM", java.util.Locale.getDefault())
         val ordered = msgs.sortedBy { it.ts }
+
+        val who = chat?.let { c ->
+            if (c.number != null) "**${c.title}** (`${c.number}`)" else "**${c.title}**"
+        } ?: "неизвестный контакт"
 
         val lines = ArrayList<HistLine>(ordered.size)
         for (m in ordered) {
@@ -248,7 +256,7 @@ object TelegramPoller {
             val attach = ArrayList<Pair<String, java.io.File>>()
             val sb = StringBuilder()
             sb.append(if (ci == 0)
-                "**📜 История диалога в Viber**\nс `$phone` — ${ordered.size} сообщ. (↙️ вход · \u2800↗️ исход)\n\n"
+                "**📜 История диалога в Viber**\n$who — ${ordered.size} сообщ.\n\n"
             else
                 "**📜 История диалога в Viber** — продолжение ${ci + 1}/${chunks.size}\n\n")
 
@@ -267,6 +275,25 @@ object TelegramPoller {
             for (l in tail) sb.append(renderHistLine(l, attach))
             TelegramClient.sendRich(sb.toString(), null, attach)
         }
+    }
+
+    /** Contact card: everything the provider knows about the chat's counterpart. */
+    private fun sendContactInfo(chat: ViberApi.Chat) {
+        val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
+        val md = buildString {
+            append("**👤 Контакт**\n\n")
+            append("**Имя:** ${chat.title.ifBlank { "—" }}\n")
+            append("**Телефон:** `${chat.number ?: "—"}`\n")
+            append("**chat_id:** ${chat.chatId} (type ${chat.type})\n")
+            if (chat.lastText != null || chat.lastTs > 0) {
+                append("**Последнее сообщение:** `${sdf.format(java.util.Date(chat.lastTs))}`")
+                if (chat.lastText != null) append(" — ${chat.lastText.take(200)}")
+                append("\n")
+            }
+            if (chat.unread > 0) append("**Непрочитанных:** ${chat.unread}\n")
+            append("\n_(аватар профиля недоступен: провайдер v20 не отдаёт контактные данные — нужен метод /contact в сборке)_")
+        }
+        TelegramClient.sendRich(md)
     }
 
     /** Registers the photo for upload and substitutes its per-chunk media id. */

@@ -46,13 +46,12 @@ object TelegramClient {
     fun sendViberAlert(
         ctx: Context,
         chatId: Long,
-        phone: String,
         body: String,
         attach: List<Pair<String, java.io.File>> = emptyList()
     ): Boolean {
         val kb = JSONArray().apply {
             put(JSONArray().apply {
-                put(button("💬 Открыть в Viber", "viber_open:$phone"))
+                put(button("👤 Инфо", "viber_info:$chatId"))
                 put(button("📜 Прочитать весь диалог", "viber_read:$chatId"))
             })
             put(JSONArray().apply {

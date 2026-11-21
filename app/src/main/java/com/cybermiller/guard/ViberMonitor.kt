@@ -144,7 +144,7 @@ object ViberMonitor {
             }
         }
 
-        return TelegramClient.sendViberAlert(ctx, e.chatId, e.number ?: "", md, attach).also { ok ->
+        return TelegramClient.sendViberAlert(ctx, e.chatId, md, attach).also { ok ->
             Log.i(TAG, "forwarded viber msg #${e.msgId} chat=${e.chatId} media=${attach.isNotEmpty()} ok=$ok")
         }
     }
