@@ -165,6 +165,8 @@ object HealthMonitor {
     private class Panel(
         val title: String, val unit: String, val color: Int,
         val values: List<Float>,
+        /** Fixed top of the scale (e.g. 100% for battery); null = max*1.08. */
+        val fixedMax: Float? = null,
     )
 
     /** Renders battery / battery-temp / storage / RAM panels into one PNG. */
@@ -176,7 +178,7 @@ object HealthMonitor {
 
             val panels = listOf(
                 Panel("🔋 Батарея, %", "%", Color.rgb(76, 217, 100),
-                    samples.map { it.battery.toFloat() }),
+                    samples.map { it.battery.toFloat() }, fixedMax = 100f),
                 Panel("🌡 Температура батареи, °C", "°C", Color.rgb(255, 149, 0),
                     samples.map { it.battTemp / 10f }),
                 Panel("💾 Свободно /data, ГБ", " ГБ", Color.rgb(90, 200, 250),
@@ -186,7 +188,7 @@ object HealthMonitor {
             )
 
             val w = 1000
-            val panelH = 240
+            val panelH = 320
             val padL = 20f
             val padR = 150f
             val top = 16f
@@ -222,10 +224,9 @@ object HealthMonitor {
                 canvas.drawRect(plotL, y0 + 6f, w - 10f, y0 + panelH - 6f, bgPaint)
                 canvas.drawText(p.title, padL + 10f, y0 + 34f, titlePaint)
 
-                val minV = p.values.minOrNull() ?: 0f
                 val maxV = p.values.maxOrNull() ?: 0f
-                val lo = if (maxV - minV < 1e-6f) minV - 1f else minV - (maxV - minV) * 0.08f
-                val hi = if (maxV - minV < 1e-6f) maxV + 1f else maxV + (maxV - minV) * 0.08f
+                val lo = 0f                                  // always start from zero
+                val hi = p.fixedMax ?: (maxV * 1.08f).coerceAtLeast(1f)
                 val range = (hi - lo).coerceAtLeast(1e-6f)
 
                 fun x(ts: Long) = plotL + (ts - t0).toFloat() / span * (plotR - plotL)
