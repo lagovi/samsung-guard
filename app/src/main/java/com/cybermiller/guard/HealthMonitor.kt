@@ -223,6 +223,7 @@ object HealthMonitor {
 
     private class Panel(
         val title: String, val unit: String, val color: Int,
+        /** Index-aligned with the drawn sample list; NaN = no reading. */
         val values: List<Float>,
         /** Fixed top of the scale (e.g. 100% for battery); null = max*1.08. */
         val fixedMax: Float? = null,
@@ -249,8 +250,13 @@ object HealthMonitor {
             val t1 = samples.last().ts
             val span = (t1 - t0).coerceAtLeast(1L)
 
-            val cpuLoads = samples.map { it.cpuLoadPct }.filter { it >= 0 }
-            val cpuFreqs = samples.map { it.cpuFreqAvgMhz }.filter { it > 0 }
+            // CPU panels keep values aligned with `samples`: NaN marks a point
+            // that has no reading (the first tick after start has no previous
+            // /proc/stat sample to diff against). A filtered list here would
+            // desynchronise value indices from sample timestamps and crash
+            // the polyline loop with IndexOutOfBoundsException.
+            val hasCpuLoad = samples.any { it.cpuLoadPct >= 0 }
+            val hasCpuFreq = samples.any { it.cpuFreqAvgMhz > 0 }
             val panels = buildList {
                 add(Panel("🔋 Батарея, %", "%", Color.rgb(76, 217, 100),
                     samples.map { it.battery.toFloat() }, fixedMax = 100f))
@@ -260,10 +266,13 @@ object HealthMonitor {
                     samples.map { it.storageFreeMb / 1024f }))
                 add(Panel("🧠 Свободно RAM, МБ", " МБ", Color.rgb(175, 122, 255),
                     samples.map { it.ramFreeMb.toFloat() }))
-                if (cpuLoads.isNotEmpty()) add(Panel("🧮 Загрузка CPU, %", "%",
-                    Color.rgb(255, 76, 76), cpuLoads.map { it.toFloat() }, fixedMax = 100f))
-                if (cpuFreqs.isNotEmpty()) add(Panel("📡 Частота CPU (средн.), МГц", " МГц",
-                    Color.rgb(255, 204, 92), cpuFreqs.map { it.toFloat() }))
+                if (hasCpuLoad) add(Panel("🧮 Загрузка CPU, %", "%",
+                    Color.rgb(255, 76, 76),
+                    samples.map { if (it.cpuLoadPct >= 0) it.cpuLoadPct.toFloat() else Float.NaN },
+                    fixedMax = 100f))
+                if (hasCpuFreq) add(Panel("📡 Частота CPU (средн.), МГц", " МГц",
+                    Color.rgb(255, 204, 92),
+                    samples.map { if (it.cpuFreqAvgMhz > 0) it.cpuFreqAvgMhz.toFloat() else Float.NaN }))
             }
 
             val w = 1000
@@ -304,7 +313,7 @@ object HealthMonitor {
                 canvas.drawRect(plotL, y0 + 6f, w - 10f, y0 + panelH - 6f, bgPaint)
                 canvas.drawText(p.title, padL + 10f, y0 + 34f, titlePaint)
 
-                val maxV = p.values.maxOrNull() ?: 0f
+                val maxV = p.values.filter { !it.isNaN() }.maxOrNull() ?: 0f
                 val lo = 0f                                  // always start from zero
                 val hi = p.fixedMax ?: (maxV * 1.08f).coerceAtLeast(1f)
                 val range = (hi - lo).coerceAtLeast(1e-6f)
@@ -321,22 +330,27 @@ object HealthMonitor {
                 // "0" anchor (lo is always zero), centred on its level
                 canvas.drawText(fmt(p, 0f), plotR + 8f, plotB + 8f, labelPaint)
 
-                // polyline — continuous (sleep is shown by the shaded bands)
+                // polyline — continuous (sleep is shown by the shaded bands);
+                // NaN points (no reading) break the line
                 linePaint.color = p.color
                 dotPaint.color = p.color
                 val path = Path()
+                var penDown = false
                 samples.forEachIndexed { i, s ->
-                    val px = x(s.ts); val py = y(p.values[i])
-                    if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
+                    val v = p.values[i]
+                    if (v.isNaN()) { penDown = false; return@forEachIndexed }
+                    val px = x(s.ts); val py = y(v)
+                    if (penDown) path.lineTo(px, py) else { path.moveTo(px, py); penDown = true }
                 }
                 canvas.drawPath(path, linePaint)
 
                 // min / max point markers; a marker coinciding with the newest
                 // point is skipped — the last-value label already covers it
                 val lastIdx = samples.size - 1
-                if (p.values.distinct().size > 1) {
-                    val maxIdx = p.values.indices.maxByOrNull { p.values[it] } ?: -1
-                    val minIdx = p.values.indices.minByOrNull { p.values[it] } ?: -1
+                val valid = p.values.withIndex().filter { !it.value.isNaN() }
+                if (valid.map { it.value }.distinct().size > 1) {
+                    val maxIdx = valid.maxByOrNull { it.value }!!.index
+                    val minIdx = valid.minByOrNull { it.value }!!.index
                     for ((idx, isMax) in listOf(maxIdx to true, minIdx to false)) {
                         if (idx < 0 || idx == lastIdx) continue
                         if (!isMax && idx == maxIdx) continue   // flat range, one marker is enough
@@ -352,9 +366,12 @@ object HealthMonitor {
 
                 // last value dot + label
                 val last = samples.last()
-                val lx = x(last.ts); val ly = y(p.values.last())
-                canvas.drawCircle(lx, ly, 5f, dotPaint)
-                canvas.drawText(fmt(p, p.values.last()), lx - 70f, ly - 12f, labelPaint)
+                val lastV = p.values.last()
+                if (!lastV.isNaN()) {
+                    val lx = x(last.ts); val ly = y(lastV)
+                    canvas.drawCircle(lx, ly, 5f, dotPaint)
+                    canvas.drawText(fmt(p, lastV), lx - 70f, ly - 12f, labelPaint)
+                }
 
                 // day ticks
                 val cal = Calendar.getInstance()
