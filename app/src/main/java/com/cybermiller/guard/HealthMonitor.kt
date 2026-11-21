@@ -120,12 +120,27 @@ object HealthMonitor {
         val s = sample(ctx)
         val sb = StringBuilder()
         sb.append("🔋 Батарея: ${s.battery}%")
-        if (s.battTemp > 0) sb.append(", ${s.battTemp / 10.0}°C")
+        if (s.battTemp > 0) sb.append(", ${"%.1f".format(s.battTemp / 10.0)}°C")
         sb.append(if (s.charging) " (заряжается)\n" else "\n")
-        sb.append("💾 Хранилище /data: ${s.storageFreeMb / 1024} ГБ свободно\n")
-        sb.append("🧠 RAM свободно: ${s.ramFreeMb} МБ\n")
-        sb.append("⚙️ Load (1 мин): ${s.load1}\n")
-        if (s.socTemp > 0) sb.append("🌡 SoC: ${s.socTemp / 10.0}°C\n")
+        try {
+            val sf = StatFs("/data")
+            val freeGb = sf.availableBytes / 1e9
+            val totalGb = sf.totalBytes / 1e9
+            sb.append("💾 Хранилище: ${"%.1f".format(freeGb)}/${"%.1f".format(totalGb)} ГБ свободно\n")
+        } catch (_: Exception) {}
+        try {
+            val mi = File("/proc/meminfo").readLines()
+            fun kb(key: String) = mi.firstOrNull { it.startsWith(key + ":") }
+                ?.substringAfter(":")?.replace(Regex("[^0-9]"), "")?.toLongOrNull() ?: 0L
+            var avail = kb("MemAvailable")
+            if (avail <= 0L) avail = kb("MemFree") + kb("Buffers") + kb("Cached")
+            sb.append("🧠 RAM: ${avail / 1024}/${kb("MemTotal") / 1024} МБ свободно\n")
+        } catch (_: Exception) {}
+        try {
+            val loads = File("/proc/loadavg").readText().trim().split(" ").take(3).joinToString(" ")
+            sb.append("⚙️ Load: $loads\n")
+        } catch (_: Exception) {}
+        if (s.socTemp > 0) sb.append("🌡 SoC: ${"%.1f".format(s.socTemp / 10.0)}°C\n")
         return sb.toString().trimEnd()
     }
 
