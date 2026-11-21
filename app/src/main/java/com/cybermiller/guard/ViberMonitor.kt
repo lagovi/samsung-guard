@@ -39,13 +39,20 @@ object ViberMonitor {
         watermark = p.getLong("viber_fwd_max_id", -1L)
         Log.i(TAG, "viber monitor start, stored watermark=$watermark")
         Thread {
-            if (watermark < 0) prime(appCtx)
-            pollEvents(appCtx)
-            while (running) {
-                try { Thread.sleep(POLL_INTERVAL_MS) } catch (_: InterruptedException) {}
-                try { pollEvents(appCtx) } catch (t: Throwable) {
-                    Log.w(TAG, "poll failed: ${t.javaClass.simpleName}: ${t.message}")
+            try {
+                if (watermark < 0) prime(appCtx)
+                pollEvents(appCtx)
+                while (running) {
+                    try { Thread.sleep(POLL_INTERVAL_MS) } catch (_: InterruptedException) {}
+                    try { pollEvents(appCtx) } catch (t: Throwable) {
+                        Log.w(TAG, "poll failed: ${t.javaClass.simpleName}: ${t.message}")
+                    }
                 }
+            } catch (t: Throwable) {
+                // Never let the monitor thread kill the whole process.
+                Log.w(TAG, "monitor crashed: ${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                running = false
             }
         }.apply { isDaemon = true }.start()
     }

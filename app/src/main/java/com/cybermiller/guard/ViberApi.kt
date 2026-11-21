@@ -57,6 +57,20 @@ object ViberApi {
         val number: String?,
     )
 
+    /**
+     * Normalises `data` array elements. /chats and /messages return nested
+     * objects, but /events returns each element as a JSON-encoded string —
+     * accept both shapes.
+     */
+    private fun elements(arr: JSONArray): List<JSONObject> =
+        (0 until arr.length()).mapNotNull { i ->
+            when (val v = arr.opt(i)) {
+                is JSONObject -> v
+                is String -> try { JSONObject(v) } catch (_: Exception) { null }
+                else -> null
+            }
+        }
+
     private fun query(ctx: Context, uri: String): JSONArray? {
         return try {
             ctx.contentResolver.query(android.net.Uri.parse(uri), arrayOf("json"), null, null, null)
@@ -104,10 +118,8 @@ object ViberApi {
 
     fun chats(ctx: Context, limit: Int = 100): List<Chat> {
         val arr = query(ctx, "$BASE/chats?limit=$limit") ?: return emptyList()
-        val out = ArrayList<Chat>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            out.add(Chat(
+        return elements(arr).map { o ->
+            Chat(
                 chatId = o.optLong("chat_id"),
                 type = o.optInt("type"),
                 title = o.optString("title"),
@@ -116,9 +128,8 @@ object ViberApi {
                 lastText = o.optString("last_text").takeIf { it.isNotEmpty() },
                 lastDir = o.optString("last_dir").takeIf { it.isNotEmpty() },
                 unread = o.optInt("unread"),
-            ))
+            )
         }
-        return out
     }
 
     /** Messages of a chat, newest first. */
@@ -126,10 +137,8 @@ object ViberApi {
         val sb = StringBuilder("$BASE/messages?chat_id=$chatId&limit=$limit")
         if (beforeId != null) sb.append("&before_id=$beforeId")
         val arr = query(ctx, sb.toString()) ?: return emptyList()
-        val out = ArrayList<Msg>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            out.add(Msg(
+        return elements(arr).map { o ->
+            Msg(
                 id = o.optLong("id"),
                 dir = o.optString("dir"),
                 status = o.optInt("status"),
@@ -138,27 +147,23 @@ object ViberApi {
                 sender = o.optString("sender").takeIf { it.isNotEmpty() },
                 senderNumber = o.optString("sender_number").takeIf { it.isNotEmpty() },
                 extraUri = o.optString("extra_uri").takeIf { it.isNotEmpty() },
-            ))
+            )
         }
-        return out
     }
 
     /** Last ≤100 incoming events (ring buffer inside the Viber process). */
     fun events(ctx: Context): List<Event> {
         val arr = query(ctx, "$BASE/events") ?: return emptyList()
-        val out = ArrayList<Event>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            out.add(Event(
+        return elements(arr).map { o ->
+            Event(
                 chatId = o.optLong("chat_id"),
                 msgId = o.optLong("msg_id"),
                 ts = o.optLong("ts"),
                 body = o.optString("body"),
                 sender = o.optString("sender").takeIf { it.isNotEmpty() },
                 number = o.optString("number").takeIf { it.isNotEmpty() },
-            ))
+            )
         }
-        return out
     }
 
     /**
