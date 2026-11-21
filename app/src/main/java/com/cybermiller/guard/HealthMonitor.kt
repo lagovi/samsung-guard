@@ -302,11 +302,6 @@ object HealthMonitor {
                 val plotB = y0 + panelH - 34f
 
                 canvas.drawRect(plotL, y0 + 6f, w - 10f, y0 + panelH - 6f, bgPaint)
-                // sleep bands: vertical stripes where the device was suspended
-                for ((b0, b1) in bands) {
-                    val bx0 = x(b0); val bx1 = x(b1)
-                    if (bx1 > plotL && bx0 < plotR) canvas.drawRect(bx0, y0 + 6f, bx1, y0 + panelH - 6f, bandPaint)
-                }
                 canvas.drawText(p.title, padL + 10f, y0 + 34f, titlePaint)
 
                 val maxV = p.values.maxOrNull() ?: 0f
@@ -316,6 +311,12 @@ object HealthMonitor {
 
                 fun x(ts: Long) = plotL + (ts - t0).toFloat() / span * (plotR - plotL)
                 fun y(v: Float) = plotB - (v - lo) / range * (plotB - plotT)
+
+                // sleep bands: vertical stripes where the device was suspended
+                for ((b0, b1) in bands) {
+                    val bx0 = x(b0); val bx1 = x(b1)
+                    if (bx1 > plotL && bx0 < plotR) canvas.drawRect(bx0, plotT, bx1, plotB, bandPaint)
+                }
 
                 // "0" anchor (lo is always zero), centred on its level
                 canvas.drawText(fmt(p, 0f), plotR + 8f, plotB + 8f, labelPaint)
