@@ -115,7 +115,13 @@ object ViberApi {
                         Log.w(TAG, "$uri -> error: ${env.optString("error")}")
                         return null
                     }
-                    env.optJSONArray("data")
+                    // /contact (single card) returns data as a JSON object,
+                    // /chats, /messages, /events return an array — normalise.
+                    when (val d = env.opt("data")) {
+                        is JSONArray -> d
+                        is JSONObject -> JSONArray().put(d)
+                        else -> null
+                    }
                 }
         } catch (e: SecurityException) {
             Log.w(TAG, "provider rejected us (signature mismatch?): ${e.message}")
