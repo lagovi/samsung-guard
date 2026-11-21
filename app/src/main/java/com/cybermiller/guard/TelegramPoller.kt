@@ -160,8 +160,10 @@ object TelegramPoller {
         }
     }
 
-    /** Full history of a chat via /messages paging (before_id), oldest last. */
-    private fun readHistory(ctx: Context, chatId: Long, cap: Int = 500): List<ViberApi.Msg> {
+    /** Full history of a chat via /messages paging (before_id), oldest last.
+     *  Cap 2000 = provider's max page size; deeper history is not stored
+     *  locally by Viber anyway (server keeps only a recent tail per dialog). */
+    private fun readHistory(ctx: Context, chatId: Long, cap: Int = 2000): List<ViberApi.Msg> {
         val out = ArrayList<ViberApi.Msg>()
         var before: Long? = null
         while (out.size < cap) {
@@ -174,63 +176,100 @@ object TelegramPoller {
         return out.reversed() // oldest first
     }
 
+    /** Newest messages always visible; everything older collapses under <details>. */
+    private const val HIST_VISIBLE_TAIL = 20
+    /** Per-message hard caps of one rich message: 32768 chars, 50 media, 500 blocks. */
+    private const val HIST_MAX_CHARS = 30_000
+    private const val HIST_MAX_PHOTOS = 50
+    private const val HIST_MAX_BLOCKS = 440
+
+    /** One formatted history line; photo rides along, media id patched at render. */
+    private data class HistLine(val ts: Long, val md: String, val photo: java.io.File?)
+
     /**
-     * Uploads the whole conversation as rich messages in chronological order.
-     * Photos are embedded in the message body (tg://photo?id=) at their place
-     * in the dialogue; internal Viber content:// URIs never surface.
-     *
-     * Everything fits into ONE message until a hard API limit is hit:
-     * 32768 chars of text or 50 media attachments per rich message. Those are
-     * the only reasons to split — never the text/media alternation.
+     * Uploads the whole conversation as ONE rich message whenever it fits the
+     * API caps (32768 chars / 50 photos / ~500 blocks): photos embedded in the
+     * body at their place in the dialogue, internal Viber content:// URIs never
+     * surface. The beginning of the dialog is collapsed under a <details>
+     * spoiler ("Ранняя история — ещё N сообщ."), the newest
+     * [HIST_VISIBLE_TAIL] messages stay visible. A dialog bigger than the caps
+     * splits into several messages, oldest first, each with its own spoiler.
      */
     private fun sendViberHistory(ctx: Context, msgs: List<ViberApi.Msg>, phone: String) {
         val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
+        val sdfDay = java.text.SimpleDateFormat("dd.MM", java.util.Locale.getDefault())
         val ordered = msgs.sortedBy { it.ts }
 
-        val header = "**📜 История диалога в Viber**\nс `$phone` — ${ordered.size} сообщ.\n\n"
-        var chunk = StringBuilder(header)
-        var attach = ArrayList<Pair<String, java.io.File>>()
-
-        fun flush() {
-            if (chunk.isBlank()) return
-            if (attach.isEmpty()) {
-                TelegramClient.sendRich(chunk.toString())
-            } else {
-                TelegramClient.sendRich(chunk.toString(), null, attach)
-            }
-            chunk = StringBuilder()
-            attach = ArrayList()
-        }
-
+        val lines = ArrayList<HistLine>(ordered.size)
         for (m in ordered) {
             val dir = if (m.dir == "in") "⬅️" else "➡️"
             val isMedia = m.body.startsWith("content://")
             val text = if (isMedia) "" else m.body
-
+            val stamp = "`" + sdf.format(java.util.Date(m.ts)) + "`"
             if (isMedia) {
                 val file = ViberReader.exportMedia(ctx, m)
                 if (file != null) {
-                    if (attach.size >= 50) flush()   // API cap: 50 media per message
-                    val id = "m${attach.size}"
-                    attach.add(id to file)
-                    chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts))).append("` ")
-                    if (text.isNotBlank()) chunk.append(text.take(300)).append(" ")
-                    chunk.append("![](tg://photo?id=$id)\n\n")
+                    val cap = if (text.isNotBlank()) " " + text.take(300) else ""
+                    lines.add(HistLine(m.ts, "$dir $stamp$cap\n\n![](tg://photo?id=@@)\n\n", file))
                 } else {
-                    chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts)))
-                        .append("` _(медиа недоступно)_")
-                    if (text.isNotBlank()) chunk.append("\n").append(text.take(300))
-                    chunk.append("\n\n")
+                    val cap = if (text.isNotBlank()) "\n" + text.take(300) else ""
+                    lines.add(HistLine(m.ts, "$dir $stamp _(медиа недоступно)_$cap\n\n", null))
                 }
             } else {
-                chunk.append("$dir `").append(sdf.format(java.util.Date(m.ts))).append("` ")
-                chunk.append(if (text.isNotBlank()) text.take(800) else "_(пусто)_")
-                chunk.append("\n\n")
+                val body = if (text.isNotBlank()) text.take(800) else "_(пусто)_"
+                lines.add(HistLine(m.ts, "$dir $stamp $body\n\n", null))
             }
-
-            if (chunk.length > 30_000) flush()   // API cap: 32768 chars; leave margin
         }
-        flush()
+
+        // Split by the hard caps — the only reason a chunk boundary appears.
+        val chunks = ArrayList<List<HistLine>>()
+        var cur = ArrayList<HistLine>()
+        var photos = 0
+        var chars = 0
+        var blocks = 0
+        for (l in lines) {
+            val photoCost = if (l.photo != null) 1 else 0
+            val cost = l.md.length + 30
+            if (photos + photoCost > HIST_MAX_PHOTOS ||
+                chars + cost > HIST_MAX_CHARS ||
+                blocks + 1 + photoCost > HIST_MAX_BLOCKS) {
+                chunks.add(cur); cur = ArrayList(); photos = 0; chars = 0; blocks = 0
+            }
+            cur.add(l); photos += photoCost; chars += cost; blocks += 1 + photoCost
+        }
+        if (cur.isNotEmpty()) chunks.add(cur)
+
+        chunks.forEachIndexed { ci, clines ->
+            val attach = ArrayList<Pair<String, java.io.File>>()
+            val sb = StringBuilder()
+            sb.append(if (ci == 0)
+                "**📜 История диалога в Viber**\nс `$phone` — ${ordered.size} сообщ.\n\n"
+            else
+                "**📜 История диалога в Viber** — продолжение ${ci + 1}/${chunks.size}\n\n")
+
+            val tailN = minOf(HIST_VISIBLE_TAIL, clines.size)
+            val older = clines.dropLast(tailN)
+            val tail = clines.takeLast(tailN)
+            if (older.isNotEmpty()) {
+                val from = sdfDay.format(java.util.Date(older.first().ts))
+                val to = sdfDay.format(java.util.Date(older.last().ts))
+                sb.append("<details><summary>📋 Ранняя история — ещё ${older.size} сообщ.")
+                sb.append(if (from != to) " ($from … $to)" else " ($from)")
+                sb.append("</summary>\n\n")
+                for (l in older) sb.append(renderHistLine(l, attach))
+                sb.append("</details>\n\n")
+            }
+            for (l in tail) sb.append(renderHistLine(l, attach))
+            TelegramClient.sendRich(sb.toString(), null, attach)
+        }
+    }
+
+    /** Registers the photo for upload and substitutes its per-chunk media id. */
+    private fun renderHistLine(l: HistLine, attach: ArrayList<Pair<String, java.io.File>>): String {
+        if (l.photo == null) return l.md
+        attach.add("m${attach.size}" to l.photo)
+        val id = attach.last().first
+        return l.md.replace("tg://photo?id=@@", "tg://photo?id=$id")
     }
 
     private fun answerCallback(cbId: String, text: String) {
