@@ -7,13 +7,8 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
 
 class GuardService : Service() {
-
-    private var scheduler: ScheduledExecutorService? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -23,13 +18,10 @@ class GuardService : Service() {
         TelegramPoller.start(this)
         CallMonitor.start(this)
         ViberMonitor.start(this)
+        HealthMonitor.start(this)
 
-        scheduler = Executors.newSingleThreadScheduledExecutor().apply {
-            // first health report after 30 s, then every 6 h
-            schedule({ safe { HealthMonitor.report(this@GuardService) } }, 30, TimeUnit.SECONDS)
-            scheduleAtFixedRate({ safe { HealthMonitor.report(this@GuardService) } },
-                6, 6, TimeUnit.HOURS)
-        }
+        // Telegram menu (Меню → /health, /start). Idempotent.
+        TelegramClient.setMyCommands()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -40,12 +32,8 @@ class GuardService : Service() {
         TelegramPoller.stop()
         CallMonitor.stop(this)
         ViberMonitor.stop()
-        scheduler?.shutdownNow()
+        HealthMonitor.stop()
         super.onDestroy()
-    }
-
-    private inline fun safe(block: () -> Unit) {
-        try { block() } catch (_: Throwable) {}
     }
 
     private fun createChannel() {

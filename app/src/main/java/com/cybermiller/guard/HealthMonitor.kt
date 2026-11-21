@@ -1,73 +1,277 @@
 package com.cybermiller.guard
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.os.BatteryManager
+import android.os.PowerManager
 import android.os.StatFs
+import android.util.Log
 import java.io.File
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Device health: hourly sampling while the device is awake, stored history,
+ * graphs on demand (Telegram menu → /health).
+ *
+ * Nothing is pushed on a schedule — the report is sent only when the owner
+ * asks for it. Sampling: a plain Thread.sleep loop; when the CPU suspends the
+ * timer freezes, so sleep periods produce no samples by themselves — plus an
+ * explicit isInteractive check (screen off = asleep).
+ */
 object HealthMonitor {
-    /** Returns a compact human-readable device health line. */
-    fun snapshot(ctx: Context): String {
-        val sb = StringBuilder()
+    private const val TAG = "GuardHealth"
+    private const val SAMPLE_INTERVAL_MS = 3600_000L
+    private const val RETENTION_MS = 30L * 24 * 3600 * 1000   // 30 days
+    private const val GRAPH_DAYS = 14L
+    private const val GAP_MS = 2.5f * 3600 * 1000             // break lines across sleep gaps
 
-        // Battery
+    @Volatile private var running = false
+
+    fun start(ctx: Context) {
+        if (running) return
+        running = true
+        Log.i(TAG, "health monitor start (hourly, awake only)")
+        val appCtx = ctx.applicationContext
+        Thread {
+            try {
+                collectIfAwake(appCtx)   // one sample right after service start
+                while (running) {
+                    try { Thread.sleep(SAMPLE_INTERVAL_MS) } catch (_: InterruptedException) {}
+                    if (!running) break
+                    try { collectIfAwake(appCtx) } catch (t: Throwable) {
+                        Log.w(TAG, "collect failed: ${t.javaClass.simpleName}: ${t.message}")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "health monitor crashed: ${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                running = false
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    fun stop() { running = false }
+
+    /** Takes a sample only when the device is awake (screen on = "не спит"). */
+    private fun collectIfAwake(ctx: Context) {
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!pm.isInteractive) {
+            Log.i(TAG, "device asleep — sample skipped")
+            return
+        }
+        val s = sample(ctx)
+        HealthStore.insert(ctx, s)
+        HealthStore.prune(ctx, System.currentTimeMillis() - RETENTION_MS)
+        Log.i(TAG, "sample: bat=${s.battery}% temp=${s.battTemp / 10.0}°C " +
+            "sto=${s.storageFreeMb / 1024}GB ram=${s.ramFreeMb}MB load=${s.load1}")
+    }
+
+    fun sample(ctx: Context): HealthStore.Sample {
         val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
         val level = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
         val b = ctx.registerReceiver(null, android.content.IntentFilter(
             android.content.Intent.ACTION_BATTERY_CHANGED))
-        val temp = b?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
-        val plugged = b?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
-        sb.append("🔋 Battery: $level%")
-        if (temp > 0) sb.append(", ${"%.1f".format(temp / 10.0)}°C")
-        sb.append(if (plugged != 0) " (charging)" else " (discharging)")
-        sb.append("\n")
+        val battTemp = b?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
+        val charging = (b?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
 
-        // Storage (/data)
-        try {
-            val sf = StatFs("/data")
-            val freeGb = sf.availableBytes / 1e9
-            val totalGb = sf.totalBytes / 1e9
-            sb.append("💾 Storage: ${"%.1f".format(freeGb)}/${"%.0f".format(totalGb)} GB free\n")
-        } catch (_: Exception) {}
+        val storageFreeMb = try {
+            (StatFs("/data").availableBytes / (1024 * 1024)).toInt()
+        } catch (_: Exception) { 0 }
 
-        // RAM
-        try {
+        val ramFreeMb = try {
             val mi = File("/proc/meminfo").readLines()
             fun kb(key: String) = mi.firstOrNull { it.startsWith(key + ":") }
                 ?.substringAfter(":")?.replace(Regex("[^0-9]"), "")?.toLongOrNull() ?: 0L
-            val total = kb("MemTotal")
-            val avail = kb("MemAvailable")
-            var free = avail
-            if (free <= 0) {
-                // older kernels lack MemAvailable; approximate with MemFree + Buffers + Cached
-                free = kb("MemFree") + kb("Buffers") + kb("Cached")
-            }
-            if (total > 0 && free > 0) {
-                val freeMb = free / 1024
-                val totalMb = total / 1024
-                sb.append("🧠 RAM: $freeMb/$totalMb MB free\n")
-            }
-        } catch (_: Exception) {}
+            var avail = kb("MemAvailable")
+            if (avail <= 0L) avail = kb("MemFree") + kb("Buffers") + kb("Cached")
+            (avail / 1024L).toInt()
+        } catch (_: Exception) { 0 }
 
-        // Load
-        try {
-            val load = File("/proc/loadavg").readText().trim().split(" ").take(3).joinToString(" ")
-            sb.append("⚙️ Load: $load\n")
-        } catch (_: Exception) {}
+        val load1 = try {
+            File("/proc/loadavg").readText().trim().split(" ").first().toFloatOrNull() ?: 0f
+        } catch (_: Exception) { 0f }
 
-        // Thermal
-        try {
-            val t = File("/sys/class/thermal/thermal_zone0/temp").readText().trim().toIntOrNull()
-            if (t != null && t > 1000) sb.append("🌡 SoC: ${t / 1000.0}°C\n")
-        } catch (_: Exception) {}
+        val socTemp = try {
+            val t = File("/sys/class/thermal/thermal_zone0/temp").readText().trim().toIntOrNull() ?: 0
+            if (t > 1000) t / 10 else 0     // millidegrees → tenths of °C
+        } catch (_: Exception) { 0 }
 
+        return HealthStore.Sample(
+            ts = System.currentTimeMillis(),
+            battery = level,
+            charging = charging,
+            battTemp = battTemp,        // EXTRA_TEMPERATURE is already tenths of °C
+            storageFreeMb = storageFreeMb,
+            ramFreeMb = ramFreeMb,
+            load1 = load1,
+            socTemp = socTemp,
+        )
+    }
+
+    /** Human-readable current status (the /health text part). */
+    fun currentText(ctx: Context): String {
+        val s = sample(ctx)
+        val sb = StringBuilder()
+        sb.append("🔋 Батарея: ${s.battery}%")
+        if (s.battTemp > 0) sb.append(", ${s.battTemp / 10.0}°C")
+        sb.append(if (s.charging) " (заряжается)\n" else "\n")
+        sb.append("💾 Хранилище /data: ${s.storageFreeMb / 1024} ГБ свободно\n")
+        sb.append("🧠 RAM свободно: ${s.ramFreeMb} МБ\n")
+        sb.append("⚙️ Load (1 мин): ${s.load1}\n")
+        if (s.socTemp > 0) sb.append("🌡 SoC: ${s.socTemp / 10.0}°C\n")
         return sb.toString().trimEnd()
     }
 
-    fun report(ctx: Context) {
-        TelegramClient.sendText("<b>📊 Health</b>\n" + snapshot(ctx))
+    /** Full /health reply: current status text + history graph photo. */
+    fun sendReport(ctx: Context) {
+        TelegramClient.sendText("<b>📊 Текущее состояние</b>\n" + currentText(ctx))
+        val since = System.currentTimeMillis() - GRAPH_DAYS * 24 * 3600 * 1000
+        val samples = HealthStore.since(ctx, since)
+        if (samples.size < 3) {
+            TelegramClient.sendText(
+                "Графики появятся, когда накопятся замеры (раз в час, пока телефон не спит). " +
+                    "Сейчас точек: ${samples.size}.")
+            return
+        }
+        val png = drawGraphs(ctx, samples)
+        if (png != null) TelegramClient.sendPhoto(png, "📊 Здоровье за $GRAPH_DAYS дней (замер раз в час, пока телефон не спит)")
+        else TelegramClient.sendText("❌ Не удалось построить графики")
     }
+
+    // ---------------- graphs ----------------
+
+    private class Panel(
+        val title: String, val unit: String, val color: Int,
+        val values: List<Float>,
+    )
+
+    /** Renders battery / battery-temp / storage / RAM panels into one PNG. */
+    private fun drawGraphs(ctx: Context, samples: List<HealthStore.Sample>): File? {
+        return try {
+            val t0 = samples.first().ts
+            val t1 = samples.last().ts
+            val span = (t1 - t0).coerceAtLeast(1L)
+
+            val panels = listOf(
+                Panel("🔋 Батарея, %", "%", Color.rgb(76, 217, 100),
+                    samples.map { it.battery.toFloat() }),
+                Panel("🌡 Температура батареи, °C", "°C", Color.rgb(255, 149, 0),
+                    samples.map { it.battTemp / 10f }),
+                Panel("💾 Свободно /data, ГБ", " ГБ", Color.rgb(90, 200, 250),
+                    samples.map { it.storageFreeMb / 1024f }),
+                Panel("🧠 Свободно RAM, МБ", " МБ", Color.rgb(175, 122, 255),
+                    samples.map { it.ramFreeMb.toFloat() }),
+            )
+
+            val w = 1000
+            val panelH = 240
+            val padL = 20f
+            val padR = 150f
+            val top = 16f
+            val h = (panels.size * panelH + 32).toInt()
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.drawColor(Color.rgb(22, 24, 30))
+
+            val bgPaint = Paint().apply { color = Color.rgb(30, 33, 41) }
+            val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE; textSize = 30f; isFakeBoldText = true
+            }
+            val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(160, 166, 178); textSize = 22f
+            }
+            val gridPaint = Paint().apply {
+                color = Color.rgb(70, 76, 88); strokeWidth = 1f
+            }
+            val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                strokeWidth = 3f; style = Paint.Style.STROKE
+            }
+            val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+            val dayFmt = SimpleDateFormat("dd.MM", Locale.getDefault())
+
+            panels.forEachIndexed { pi, p ->
+                val y0 = top + pi * panelH
+                val plotL = padL
+                val plotR = w - padR
+                val plotT = y0 + 44f
+                val plotB = y0 + panelH - 34f
+
+                canvas.drawRect(plotL, y0 + 6f, w - 10f, y0 + panelH - 6f, bgPaint)
+                canvas.drawText(p.title, padL + 10f, y0 + 34f, titlePaint)
+
+                val minV = p.values.minOrNull() ?: 0f
+                val maxV = p.values.maxOrNull() ?: 0f
+                val lo = if (maxV - minV < 1e-6f) minV - 1f else minV - (maxV - minV) * 0.08f
+                val hi = if (maxV - minV < 1e-6f) maxV + 1f else maxV + (maxV - minV) * 0.08f
+                val range = (hi - lo).coerceAtLeast(1e-6f)
+
+                fun x(ts: Long) = plotL + (ts - t0).toFloat() / span * (plotR - plotL)
+                fun y(v: Float) = plotB - (v - lo) / range * (plotB - plotT)
+
+                // min / max labels on the right margin
+                canvas.drawText(fmt(p, hi), plotR + 8f, plotT + 18f, labelPaint)
+                canvas.drawText(fmt(p, lo), plotR + 8f, plotB - 4f, labelPaint)
+
+                // polyline, broken across sleep gaps
+                linePaint.color = p.color
+                dotPaint.color = p.color
+                var path: Path? = null
+                var prevTs = 0L
+                for (i in samples.indices) {
+                    val s = samples[i]
+                    val px = x(s.ts); val py = y(p.values[i])
+                    if (path == null || (prevTs > 0 && s.ts - prevTs > GAP_MS)) {
+                        path?.let { canvas.drawPath(it, linePaint) }
+                        path = Path().apply { moveTo(px, py) }
+                    } else {
+                        path.lineTo(px, py)
+                    }
+                    prevTs = s.ts
+                }
+                path?.let { canvas.drawPath(it, linePaint) }
+
+                // last value dot + label
+                val last = samples.last()
+                val lx = x(last.ts); val ly = y(p.values.last())
+                canvas.drawCircle(lx, ly, 5f, dotPaint)
+                canvas.drawText(fmt(p, p.values.last()), lx - 70f, ly - 12f, labelPaint)
+
+                // day ticks
+                val cal = Calendar.getInstance()
+                cal.timeInMillis = t0
+                cal.set(Calendar.HOUR_OF_DAY, 0)
+                cal.set(Calendar.MINUTE, 0)
+                cal.set(Calendar.SECOND, 0)
+                while (cal.timeInMillis <= t1) {
+                    val tx = x(cal.timeInMillis)
+                    if (tx > plotL + 30f && tx < plotR - 30f) {
+                        canvas.drawLine(tx, plotT, tx, plotB, gridPaint)
+                        canvas.drawText(dayFmt.format(Date(cal.timeInMillis)), tx - 30f, y0 + panelH - 12f, labelPaint)
+                    }
+                    cal.add(Calendar.DAY_OF_MONTH, 1)
+                }
+            }
+
+            val dir = File(ctx.cacheDir, "health").apply { mkdirs() }
+            val out = File(dir, "health_graph.png")
+            out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 90, it) }
+            bmp.recycle()
+            out
+        } catch (t: Throwable) {
+            Log.w(TAG, "drawGraphs failed: ${t.javaClass.simpleName}: ${t.message}")
+            null
+        }
+    }
+
+    private fun fmt(p: Panel, v: Float): String =
+        if (kotlin.math.abs(v) >= 100f) "%.0f${p.unit}".format(v)
+        else "%.1f${p.unit}".format(v)
 }

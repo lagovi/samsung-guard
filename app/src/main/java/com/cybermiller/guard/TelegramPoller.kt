@@ -75,11 +75,21 @@ object TelegramPoller {
         val text = msg.optString("text", "")
         if (text.startsWith("/start")) {
             TelegramClient.sendText("🛡 Guard бот.\n" +
-                "Команды: /start — эта справка.\n" +
+                "Команды:\n" +
+                "• /health — текущее состояние телефона + графики за 14 дней\n" +
                 "Кнопки под сообщениями Viber:\n" +
                 "• «👤 Инфо» — карточка контакта (имя, телефон, активность)\n" +
                 "• «Прочитать весь диалог» — выгрузить историю диалога\n" +
                 "• «Ответить» — введите следующее сообщение в этом чате, оно уйдёт в Viber штатным движком")
+            return
+        }
+        if (text.startsWith("/health")) {
+            Thread {
+                try { HealthMonitor.sendReport(ctx) } catch (t: Throwable) {
+                    Log.w(TAG, "health report failed", t)
+                    TelegramClient.sendText("❌ Отчёт о состоянии не удалось построить: ${t.message}")
+                }
+            }.start()
             return
         }
         val viberChatId = awaitingReply.remove(chatId) ?: return

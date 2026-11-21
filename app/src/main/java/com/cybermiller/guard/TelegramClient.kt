@@ -111,6 +111,51 @@ object TelegramClient {
         httpPost("sendMessage", payload)
     }
 
+    /** Sends an image (e.g. the /health graph PNG) with an optional caption. */
+    fun sendPhoto(file: java.io.File, caption: String = "") {
+        val boundary = "----GuardBoundary${System.currentTimeMillis()}"
+        try {
+            val conn = (URL("https://api.telegram.org/bot$TOKEN/sendPhoto")
+                .openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                doOutput = true
+                connectTimeout = 15000; readTimeout = 60_000
+            }
+            conn.outputStream.use { os ->
+                fun field(name: String, value: String) {
+                    os.write(("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n")
+                        .toByteArray())
+                }
+                field("chat_id", CHAT)
+                if (caption.isNotEmpty()) field("caption", caption.take(1000))
+                os.write(("--$boundary\r\nContent-Disposition: form-data; name=\"photo\"; " +
+                    "filename=\"${file.name}\"\r\nContent-Type: image/png\r\n\r\n").toByteArray())
+                file.inputStream().use { it.copyTo(os) }
+                os.write("\r\n--$boundary--\r\n".toByteArray())
+            }
+            val code = conn.responseCode
+            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.readText()?.take(200) ?: ""
+            Log.i("GuardTg", "sendPhoto(${file.name}) http=$code $body")
+        } catch (e: Exception) {
+            Log.w("GuardTg", "sendPhoto failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /** Registers the bot menu (Telegram client's menu button). Idempotent. */
+    fun setMyCommands() {
+        val payload = JSONObject().apply {
+            put("commands", JSONArray().apply {
+                put(JSONObject().put("command", "start")
+                    .put("description", "Справка"))
+                put(JSONObject().put("command", "health")
+                    .put("description", "Состояние телефона: текущие значения + графики"))
+            })
+        }
+        httpPost("setMyCommands", payload)
+    }
+
     /** Uploads a local file (photo/video/document) to the owner chat. */
     fun sendFile(file: java.io.File, caption: String = "") {
         val boundary = "----GuardBoundary${System.currentTimeMillis()}"
