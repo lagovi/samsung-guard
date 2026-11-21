@@ -27,20 +27,24 @@ import java.util.Locale
  */
 object HealthMonitor {
     private const val TAG = "GuardHealth"
-    // The sample is cheap (a few /proc reads, one StatFs, one sticky broadcast;
-    // no wake-ups — the loop only runs while the device is awake), so 10 min
-    // gives dense graphs at negligible CPU/battery cost.
-    private const val SAMPLE_INTERVAL_MS = 600_000L
-    private const val RETENTION_MS = 30L * 24 * 3600 * 1000   // 30 days
+    // The sample is cheap (a few /proc and sysfs reads, one StatFs, one sticky
+    // broadcast; no wake-ups — the loop only runs while the device is awake).
+    private const val SAMPLE_INTERVAL_MS = 10_000L
+    private const val RETENTION_MS = 14L * 24 * 3600 * 1000   // 14 days (matches the graph)
     private const val GRAPH_DAYS = 14L
-    private const val GAP_MS = 2.5f * 3600 * 1000             // break lines across sleep gaps
+    private const val SLEEP_GAP_MS = 60_000L                  // no samples this long = asleep
 
     @Volatile private var running = false
+
+    // Previous /proc/stat counters for the CPU-load delta. Volatile pair kept
+    // consistent under a lock (the collector thread is the only writer).
+    private var prevCpuTotal: Long = 0L
+    private var prevCpuIdle: Long = 0L
 
     fun start(ctx: Context) {
         if (running) return
         running = true
-        Log.i(TAG, "health monitor start (hourly, awake only)")
+        Log.i(TAG, "health monitor start (10 s, awake only)")
         val appCtx = ctx.applicationContext
         Thread {
             try {
@@ -73,7 +77,8 @@ object HealthMonitor {
         HealthStore.insert(ctx, s)
         HealthStore.prune(ctx, System.currentTimeMillis() - RETENTION_MS)
         Log.i(TAG, "sample: bat=${s.battery}% temp=${s.battTemp / 10.0}°C " +
-            "sto=${s.storageFreeMb / 1024}GB ram=${s.ramFreeMb}MB load=${s.load1}")
+            "sto=${s.storageFreeMb / 1024}GB ram=${s.ramFreeMb}MB load=${s.load1} " +
+            "cpu=${s.cpuLoadPct}% freq=${s.cpuFreqAvgMhz}MHz")
     }
 
     fun sample(ctx: Context): HealthStore.Sample {
@@ -106,6 +111,10 @@ object HealthMonitor {
             if (t > 1000) t / 10 else 0     // millidegrees → tenths of °C
         } catch (_: Exception) { 0 }
 
+        val cpuLoadPct = readCpuLoadPct()
+        val freqs = readCpuFreqsMhz()
+        val cpuFreqAvg = if (freqs.isEmpty()) 0 else freqs.sum() / freqs.size
+
         return HealthStore.Sample(
             ts = System.currentTimeMillis(),
             battery = level,
@@ -115,7 +124,47 @@ object HealthMonitor {
             ramFreeMb = ramFreeMb,
             load1 = load1,
             socTemp = socTemp,
+            cpuLoadPct = cpuLoadPct,
+            cpuFreqAvgMhz = cpuFreqAvg,
         )
+    }
+
+    /**
+     * CPU utilization as a percentage, computed from /proc/stat deltas between
+     * consecutive samples. Returns -1 for the very first sample (no baseline).
+     */
+    private fun readCpuLoadPct(): Int {
+        return try {
+            val line = File("/proc/stat").readText().trim().split("\n").first()
+            val t = line.split(Regex("\\s+")).drop(1).mapNotNull { it.toLongOrNull() }
+            if (t.size < 4) return -1
+            val total = t.sum()
+            val idle = t[3] + (t.getOrNull(4) ?: 0L)    // idle + iowait
+            synchronized(this) {
+                val pct = if (prevCpuTotal > 0L) {
+                    val dTotal = total - prevCpuTotal
+                    val dIdle = idle - prevCpuIdle
+                    if (dTotal > 0L) (100f * (dTotal - dIdle) / dTotal + 0.5f).toInt() else -1
+                } else -1
+                prevCpuTotal = total
+                prevCpuIdle = idle
+                pct
+            }
+        } catch (_: Exception) { -1 }
+    }
+
+    /** Current frequency of every online core, MHz (empty list if unreadable). */
+    private fun readCpuFreqsMhz(): List<Int> {
+        val out = ArrayList<Int>(8)
+        for (i in 0..7) {
+            try {
+                val f = File("/sys/devices/system/cpu/cpu$i/cpufreq/scaling_cur_freq")
+                if (!f.exists()) break
+                val khz = f.readText().trim().toLongOrNull() ?: continue
+                out.add((khz / 1000L).toInt())
+            } catch (_: Exception) { break }
+        }
+        return out
     }
 
     /** Human-readable current status (the /health text part). */
@@ -143,6 +192,12 @@ object HealthMonitor {
             val loads = File("/proc/loadavg").readText().trim().split(" ").take(3).joinToString(" ")
             sb.append("⚙️ Load: $loads\n")
         } catch (_: Exception) {}
+        if (s.cpuLoadPct >= 0) sb.append("🧮 CPU: ${s.cpuLoadPct}%\n")
+        val freqs = readCpuFreqsMhz()
+        if (freqs.isNotEmpty()) {
+            sb.append("📡 Ядра (${freqs.size}): " +
+                freqs.joinToString("/") { "%.1f".format(it / 1000f) } + " ГГц\n")
+        }
         if (s.socTemp > 0) sb.append("🌡 SoC: ${"%.1f".format(s.socTemp / 10.0)}°C\n")
         return sb.toString().trimEnd()
     }
@@ -154,12 +209,13 @@ object HealthMonitor {
         val samples = HealthStore.since(ctx, since)
         if (samples.size < 3) {
             TelegramClient.sendText(
-                "Графики появятся, когда накопятся замеры (раз в час, пока телефон не спит). " +
+                "Графики появятся, когда накопятся замеры (раз в 10 с, пока телефон не спит). " +
                     "Сейчас точек: ${samples.size}.")
             return
         }
         val png = drawGraphs(ctx, samples)
-        if (png != null) TelegramClient.sendPhoto(png, "📊 Здоровье за $GRAPH_DAYS дней (замер раз в час, пока телефон не спит)")
+        if (png != null) TelegramClient.sendPhoto(png,
+            "📊 Здоровье за $GRAPH_DAYS дней · замер раз в 10 с, пока телефон не спит · серые полосы — сон")
         else TelegramClient.sendText("❌ Не удалось построить графики")
     }
 
@@ -172,26 +228,46 @@ object HealthMonitor {
         val fixedMax: Float? = null,
     )
 
-    /** Renders battery / battery-temp / storage / RAM panels into one PNG. */
-    private fun drawGraphs(ctx: Context, samples: List<HealthStore.Sample>): File? {
+    /** Renders the metric panels into one PNG. Sleep periods (no samples for
+     *  >60 s — CPU was suspended) are shaded, the time line itself is continuous. */
+    private fun drawGraphs(ctx: Context, samplesIn: List<HealthStore.Sample>): File? {
         return try {
+            // Sleep bands come from gaps in the FULL list (before downsampling
+            // hides them), then points are thinned for drawing.
+            val bands = ArrayList<Pair<Long, Long>>()
+            for (i in 1 until samplesIn.size) {
+                val gap = samplesIn[i].ts - samplesIn[i - 1].ts
+                if (gap > SLEEP_GAP_MS) bands.add(samplesIn[i - 1].ts to samplesIn[i].ts)
+            }
+            val samples = if (samplesIn.size <= 1200) samplesIn
+            else {
+                val step = (samplesIn.size + 1199) / 1200
+                (0 until samplesIn.size step step).map { samplesIn[it] } + samplesIn.last()
+            }
+
             val t0 = samples.first().ts
             val t1 = samples.last().ts
             val span = (t1 - t0).coerceAtLeast(1L)
 
-            val panels = listOf(
-                Panel("🔋 Батарея, %", "%", Color.rgb(76, 217, 100),
-                    samples.map { it.battery.toFloat() }, fixedMax = 100f),
-                Panel("🌡 Температура батареи, °C", "°C", Color.rgb(255, 149, 0),
-                    samples.map { it.battTemp / 10f }),
-                Panel("💾 Свободно /data, ГБ", " ГБ", Color.rgb(90, 200, 250),
-                    samples.map { it.storageFreeMb / 1024f }),
-                Panel("🧠 Свободно RAM, МБ", " МБ", Color.rgb(175, 122, 255),
-                    samples.map { it.ramFreeMb.toFloat() }),
-            )
+            val cpuLoads = samples.map { it.cpuLoadPct }.filter { it >= 0 }
+            val cpuFreqs = samples.map { it.cpuFreqAvgMhz }.filter { it > 0 }
+            val panels = buildList {
+                add(Panel("🔋 Батарея, %", "%", Color.rgb(76, 217, 100),
+                    samples.map { it.battery.toFloat() }, fixedMax = 100f))
+                add(Panel("🌡 Температура батареи, °C", "°C", Color.rgb(255, 149, 0),
+                    samples.map { it.battTemp / 10f }))
+                add(Panel("💾 Свободно /data, ГБ", " ГБ", Color.rgb(90, 200, 250),
+                    samples.map { it.storageFreeMb / 1024f }))
+                add(Panel("🧠 Свободно RAM, МБ", " МБ", Color.rgb(175, 122, 255),
+                    samples.map { it.ramFreeMb.toFloat() }))
+                if (cpuLoads.isNotEmpty()) add(Panel("🧮 Загрузка CPU, %", "%",
+                    Color.rgb(255, 76, 76), cpuLoads.map { it.toFloat() }, fixedMax = 100f))
+                if (cpuFreqs.isNotEmpty()) add(Panel("📡 Частота CPU (средн.), МГц", " МГц",
+                    Color.rgb(255, 204, 92), cpuFreqs.map { it.toFloat() }))
+            }
 
             val w = 1000
-            val panelH = 320
+            val panelH = 245
             val padL = 20f
             val padR = 150f
             val top = 16f
@@ -201,6 +277,7 @@ object HealthMonitor {
             canvas.drawColor(Color.rgb(22, 24, 30))
 
             val bgPaint = Paint().apply { color = Color.rgb(30, 33, 41) }
+            val bandPaint = Paint().apply { color = Color.rgb(48, 54, 66) }   // sleep bands
             val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.WHITE; textSize = 30f; isFakeBoldText = true
             }
@@ -225,6 +302,11 @@ object HealthMonitor {
                 val plotB = y0 + panelH - 34f
 
                 canvas.drawRect(plotL, y0 + 6f, w - 10f, y0 + panelH - 6f, bgPaint)
+                // sleep bands: vertical stripes where the device was suspended
+                for ((b0, b1) in bands) {
+                    val bx0 = x(b0); val bx1 = x(b1)
+                    if (bx1 > plotL && bx0 < plotR) canvas.drawRect(bx0, y0 + 6f, bx1, y0 + panelH - 6f, bandPaint)
+                }
                 canvas.drawText(p.title, padL + 10f, y0 + 34f, titlePaint)
 
                 val maxV = p.values.maxOrNull() ?: 0f
@@ -238,23 +320,15 @@ object HealthMonitor {
                 // "0" anchor (lo is always zero), centred on its level
                 canvas.drawText(fmt(p, 0f), plotR + 8f, plotB + 8f, labelPaint)
 
-                // polyline, broken across sleep gaps
+                // polyline — continuous (sleep is shown by the shaded bands)
                 linePaint.color = p.color
                 dotPaint.color = p.color
-                var path: Path? = null
-                var prevTs = 0L
-                for (i in samples.indices) {
-                    val s = samples[i]
+                val path = Path()
+                samples.forEachIndexed { i, s ->
                     val px = x(s.ts); val py = y(p.values[i])
-                    if (path == null || (prevTs > 0 && s.ts - prevTs > GAP_MS)) {
-                        path?.let { canvas.drawPath(it, linePaint) }
-                        path = Path().apply { moveTo(px, py) }
-                    } else {
-                        path.lineTo(px, py)
-                    }
-                    prevTs = s.ts
+                    if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
                 }
-                path?.let { canvas.drawPath(it, linePaint) }
+                canvas.drawPath(path, linePaint)
 
                 // min / max point markers; a marker coinciding with the newest
                 // point is skipped — the last-value label already covers it

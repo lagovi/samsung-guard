@@ -8,7 +8,8 @@ import android.database.sqlite.SQLiteOpenHelper
 /** Historical health samples for the /health graphs. One row per awake hour. */
 object HealthStore {
     private const val DB = "health.db"
-    private const val VER = 1
+    // v3: added CPU load % and average core frequency.
+    private const val VER = 3
     private const val T = "samples"
 
     /** One measurement. Temperatures are tenths of °C, sizes in MB. */
@@ -21,6 +22,8 @@ object HealthStore {
         val ramFreeMb: Int,
         val load1: Float,        // 1-min load average
         val socTemp: Int,        // °C × 10, 0 = unknown
+        val cpuLoadPct: Int,     // 0..100, -1 = no previous tick to diff against
+        val cpuFreqAvgMhz: Int,  // mean of online cores, 0 = unknown
     )
 
     private class Db(ctx: Context) : SQLiteOpenHelper(ctx, DB, null, VER) {
@@ -29,10 +32,14 @@ object HealthStore {
                 ts INTEGER PRIMARY KEY,
                 battery INTEGER, charging INTEGER, batt_temp INTEGER,
                 storage_free_mb INTEGER, ram_free_mb INTEGER,
-                load1 REAL, soc_temp INTEGER
+                load1 REAL, soc_temp INTEGER,
+                cpu_load_pct INTEGER, cpu_freq_avg INTEGER
             )""")
         }
-        override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {}
+        override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
+            db.execSQL("DROP TABLE IF EXISTS $T")
+            onCreate(db)
+        }
     }
 
     @Volatile private var helper: Db? = null
@@ -49,6 +56,8 @@ object HealthStore {
             put("ram_free_mb", s.ramFreeMb)
             put("load1", s.load1.toDouble())
             put("soc_temp", s.socTemp)
+            put("cpu_load_pct", s.cpuLoadPct)
+            put("cpu_freq_avg", s.cpuFreqAvgMhz)
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
@@ -68,6 +77,8 @@ object HealthStore {
                     ramFreeMb = c.getInt(c.getColumnIndexOrThrow("ram_free_mb")),
                     load1 = c.getFloat(c.getColumnIndexOrThrow("load1")),
                     socTemp = c.getInt(c.getColumnIndexOrThrow("soc_temp")),
+                    cpuLoadPct = c.getInt(c.getColumnIndexOrThrow("cpu_load_pct")),
+                    cpuFreqAvgMhz = c.getInt(c.getColumnIndexOrThrow("cpu_freq_avg")),
                 ))
             }
         }
