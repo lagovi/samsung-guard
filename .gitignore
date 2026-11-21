@@ -9,3 +9,11 @@
 .cxx
 local.properties
 app/build/
+
+# Secrets / keystore — never commit (audit 2026-11-21)
+*.keystore
+*.jks
+keystore/
+*.env
+.env
+secrets.properties
