@@ -106,30 +106,44 @@ object ViberApi {
         }
 
     private fun query(ctx: Context, uri: String): JSONArray? {
-        return try {
-            ctx.contentResolver.query(android.net.Uri.parse(uri), arrayOf("json"), null, null, null)
-                ?.use { c ->
-                    if (!c.moveToFirst()) return null
-                    val env = JSONObject(c.getString(c.getColumnIndexOrThrow("json")))
+        // Right after an install or a Viber process death AMS may not have
+        // (re)published the provider yet: ContentResolver.query then returns
+        // a NULL cursor without any exception. Retry briefly before giving up.
+        for (attempt in 1..3) {
+            val c = try {
+                ctx.contentResolver.query(android.net.Uri.parse(uri), arrayOf("json"), null, null, null)
+            } catch (e: SecurityException) {
+                Log.w(TAG, "provider rejected us (signature mismatch?): ${e.message}")
+                return null
+            } catch (e: Exception) {
+                Log.w(TAG, "query $uri failed: ${e.javaClass.simpleName}: ${e.message}")
+                return null
+            }
+            if (c == null) {
+                Log.w(TAG, "query $uri: provider not published yet (attempt $attempt/3)")
+                if (attempt < 3) try { Thread.sleep(1500L) } catch (_: InterruptedException) { return null }
+                continue
+            }
+            return c.use { cur ->
+                if (!cur.moveToFirst()) {
+                    Log.w(TAG, "$uri: empty cursor from a published provider")
+                    null
+                } else {
+                    val env = JSONObject(cur.getString(cur.getColumnIndexOrThrow("json")))
                     if (!env.optBoolean("ok", false)) {
                         Log.w(TAG, "$uri -> error: ${env.optString("error")}")
-                        return null
-                    }
-                    // /contact (single card) returns data as a JSON object,
-                    // /chats, /messages, /events return an array — normalise.
-                    when (val d = env.opt("data")) {
+                        null
+                    } else when (val d = env.opt("data")) {
+                        // /contact (single card) returns data as a JSON object,
+                        // /chats, /messages, /contacts, /events return an array.
                         is JSONArray -> d
                         is JSONObject -> JSONArray().put(d)
                         else -> null
                     }
                 }
-        } catch (e: SecurityException) {
-            Log.w(TAG, "provider rejected us (signature mismatch?): ${e.message}")
-            null
-        } catch (e: Exception) {
-            Log.w(TAG, "query $uri failed: ${e.javaClass.simpleName}: ${e.message}")
-            null
+            }
         }
+        return null
     }
 
     private fun call(ctx: Context, method: String, arg: String?, extras: Bundle): JSONObject? {
