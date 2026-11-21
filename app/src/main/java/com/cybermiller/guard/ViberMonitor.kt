@@ -133,7 +133,7 @@ object ViberMonitor {
         }
 
         val md = buildString {
-            append("**⬅️ Viber** `").append(sdf.format(Date(e.ts))).append("`\n")
+            append("**↙️ Viber** `").append(sdf.format(Date(e.ts))).append("`\n")
             append(who).append('\n')
             if (body.isNotBlank()) {
                 append("\n").append(body.take(1500))

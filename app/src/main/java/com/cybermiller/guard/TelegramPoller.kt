@@ -183,6 +183,11 @@ object TelegramPoller {
     private const val HIST_MAX_PHOTOS = 50
     private const val HIST_MAX_BLOCKS = 440
 
+    /** Direction markers: ↙️ incoming at the left edge, ↗️ outgoing indented by
+     *  invisible Braille blanks (U+2800) so the two columns read apart. */
+    private const val DIR_IN = "↙️"
+    private const val DIR_OUT = "\u2800\u2800↗️"
+
     /** One formatted history line; photo rides along, media id patched at render. */
     private data class HistLine(val ts: Long, val md: String, val photo: java.io.File?)
 
@@ -202,7 +207,7 @@ object TelegramPoller {
 
         val lines = ArrayList<HistLine>(ordered.size)
         for (m in ordered) {
-            val dir = if (m.dir == "in") "⬅️" else "➡️"
+            val dir = if (m.dir == "in") DIR_IN else DIR_OUT
             val isMedia = m.body.startsWith("content://")
             val text = if (isMedia) "" else m.body
             val stamp = "`" + sdf.format(java.util.Date(m.ts)) + "`"
@@ -243,7 +248,7 @@ object TelegramPoller {
             val attach = ArrayList<Pair<String, java.io.File>>()
             val sb = StringBuilder()
             sb.append(if (ci == 0)
-                "**📜 История диалога в Viber**\nс `$phone` — ${ordered.size} сообщ.\n\n"
+                "**📜 История диалога в Viber**\nс `$phone` — ${ordered.size} сообщ. (↙️ вход · \u2800↗️ исход)\n\n"
             else
                 "**📜 История диалога в Viber** — продолжение ${ci + 1}/${chunks.size}\n\n")
 
