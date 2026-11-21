@@ -232,9 +232,8 @@ object HealthMonitor {
                 fun x(ts: Long) = plotL + (ts - t0).toFloat() / span * (plotR - plotL)
                 fun y(v: Float) = plotB - (v - lo) / range * (plotB - plotT)
 
-                // min / max labels on the right margin
-                canvas.drawText(fmt(p, hi), plotR + 8f, plotT + 18f, labelPaint)
-                canvas.drawText(fmt(p, lo), plotR + 8f, plotB - 4f, labelPaint)
+                // "0" anchor (lo is always zero), centred on its level
+                canvas.drawText(fmt(p, 0f), plotR + 8f, plotB + 8f, labelPaint)
 
                 // polyline, broken across sleep gaps
                 linePaint.color = p.color
@@ -253,6 +252,25 @@ object HealthMonitor {
                     prevTs = s.ts
                 }
                 path?.let { canvas.drawPath(it, linePaint) }
+
+                // min / max point markers; a marker coinciding with the newest
+                // point is skipped — the last-value label already covers it
+                val lastIdx = samples.size - 1
+                if (p.values.distinct().size > 1) {
+                    val maxIdx = p.values.indices.maxByOrNull { p.values[it] } ?: -1
+                    val minIdx = p.values.indices.minByOrNull { p.values[it] } ?: -1
+                    for ((idx, isMax) in listOf(maxIdx to true, minIdx to false)) {
+                        if (idx < 0 || idx == lastIdx) continue
+                        if (!isMax && idx == maxIdx) continue   // flat range, one marker is enough
+                        val px = x(samples[idx].ts); val py = y(p.values[idx])
+                        canvas.drawCircle(px, py, 4f, dotPaint)
+                        val tx = if (px > plotR - 120f) px - 84f else px + 10f
+                        val ty = if (isMax) py - 12f
+                        else if (py > plotB - 26f) py - 12f
+                        else py + 26f
+                        canvas.drawText(fmt(p, p.values[idx]), tx, ty, labelPaint)
+                    }
+                }
 
                 // last value dot + label
                 val last = samples.last()
