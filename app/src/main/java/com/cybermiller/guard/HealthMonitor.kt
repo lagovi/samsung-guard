@@ -27,7 +27,10 @@ import java.util.Locale
  */
 object HealthMonitor {
     private const val TAG = "GuardHealth"
-    private const val SAMPLE_INTERVAL_MS = 3600_000L
+    // The sample is cheap (a few /proc reads, one StatFs, one sticky broadcast;
+    // no wake-ups — the loop only runs while the device is awake), so 10 min
+    // gives dense graphs at negligible CPU/battery cost.
+    private const val SAMPLE_INTERVAL_MS = 600_000L
     private const val RETENTION_MS = 30L * 24 * 3600 * 1000   // 30 days
     private const val GRAPH_DAYS = 14L
     private const val GAP_MS = 2.5f * 3600 * 1000             // break lines across sleep gaps
