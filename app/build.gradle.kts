@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -18,7 +20,7 @@ android {
         // locally from local.properties, in CI from GitHub Actions env/secret.
         fun secret(name: String): String {
             val local = rootDir.resolve("local.properties").takeIf { it.isFile }
-                ?.inputStream()?.use { p -> java.util.Properties().apply { load(p) } }
+                ?.inputStream()?.use { p -> Properties().apply { load(p) } }
             return System.getenv(name)
                 ?: local?.getProperty(name)
                 ?: ""
