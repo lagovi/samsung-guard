@@ -72,10 +72,12 @@ object ViberMonitor {
     }
 
     private fun pollEvents(ctx: Context) {
+        // /events is ordered oldest → newest; stop at the first failed send so
+        // ordering is kept and the failed message is retried on the next tick.
         for (e in ViberApi.events(ctx)) {
             if (e.msgId <= watermark) continue
             if (isServiceChat(e.number)) continue
-            forward(ctx, e)
+            if (!forward(ctx, e)) return
             if (e.msgId > watermark) {
                 watermark = e.msgId
                 save(ctx)
@@ -97,9 +99,10 @@ object ViberMonitor {
             )
             if (e.msgId <= watermark) return
             if (isServiceChat(e.number)) return
-            forward(ctx, e)
-            watermark = maxOf(watermark, e.msgId)
-            save(ctx)
+            if (forward(ctx, e)) {
+                watermark = maxOf(watermark, e.msgId)
+                save(ctx)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "handleEventJson failed: ${t.javaClass.simpleName}: ${t.message}")
         }
@@ -108,7 +111,8 @@ object ViberMonitor {
     /** Viber's own service/subscribe bot has number "Viber" — not the owner's traffic. */
     private fun isServiceChat(number: String?): Boolean = number == null || number == "Viber"
 
-    private fun forward(ctx: Context, e: ViberApi.Event) {
+    /** Builds the rich message and hands it to Telegram. True = accepted. */
+    private fun forward(ctx: Context, e: ViberApi.Event): Boolean {
         val who = buildString {
             if (!e.sender.isNullOrBlank()) append(e.sender)
             if (!e.number.isNullOrBlank()) {
@@ -140,8 +144,9 @@ object ViberMonitor {
             }
         }
 
-        TelegramClient.sendViberAlert(ctx, e.chatId, e.number ?: "", md, attach)
-        Log.i(TAG, "forwarded viber msg #${e.msgId} chat=${e.chatId} media=${attach.isNotEmpty()}")
+        TelegramClient.sendViberAlert(ctx, e.chatId, e.number ?: "", md, attach).also { ok ->
+            Log.i(TAG, "forwarded viber msg #${e.msgId} chat=${e.chatId} media=${attach.isNotEmpty()} ok=$ok")
+        }
     }
 
     private fun save(ctx: Context) {

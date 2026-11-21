@@ -49,7 +49,7 @@ object TelegramClient {
         phone: String,
         body: String,
         attach: List<Pair<String, java.io.File>> = emptyList()
-    ) {
+    ): Boolean {
         val kb = JSONArray().apply {
             put(JSONArray().apply {
                 put(button("💬 Открыть в Viber", "viber_open:$phone"))
@@ -59,7 +59,7 @@ object TelegramClient {
                 put(button("✏️ Ответить", "viber_reply:$chatId"))
             })
         }
-        sendRich(body, kb, attach)
+        return sendRich(body, kb, attach)
     }
 
     private fun sendMessageWithMarkup(text: String, kb: JSONArray) {
@@ -151,13 +151,17 @@ object TelegramClient {
      *
      * `markdown` is the rich-markdown body; `attach` is a list of (name, file)
      * pairs uploaded as `attach://<name>` and referenced from the markdown via
-     * `![](tg://photo?id=<name> "caption")`.
+     * `![](tg://photo?id=<name> "caption")`. `kb` is the inline keyboard rows
+     * array — wrapped here into the InlineKeyboardMarkup object Telegram needs.
+     *
+     * Returns true when Telegram accepted the message (callers use this to
+     * decide whether to advance their dedup watermark).
      */
     fun sendRich(
         markdown: String,
         kb: JSONArray? = null,
         attach: List<Pair<String, java.io.File>> = emptyList()
-    ) {
+    ): Boolean {
         val boundary = "----GuardBoundary${System.currentTimeMillis()}"
         try {
             val conn = (URL("https://api.telegram.org/bot$TOKEN/sendRichMessage")
@@ -187,7 +191,9 @@ object TelegramClient {
                 }
                 field("chat_id", CHAT)
                 field("rich_message", richJson.toString())
-                if (kb != null) field("reply_markup", kb.toString())
+                if (kb != null) {
+                    field("reply_markup", JSONObject().put("inline_keyboard", kb).toString())
+                }
                 for ((name, file) in attach) {
                     os.write(("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"; " +
                         "filename=\"${file.name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").toByteArray())
@@ -200,8 +206,10 @@ object TelegramClient {
             val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
                 ?.bufferedReader()?.readText()?.take(200) ?: ""
             Log.i("GuardTg", "sendRichMessage http=$code $body")
+            return code in 200..299 && body.contains("\"ok\":true")
         } catch (e: Exception) {
             Log.w("GuardTg", "sendRichMessage failed: ${e.javaClass.simpleName}: ${e.message}")
+            return false
         }
     }
 
