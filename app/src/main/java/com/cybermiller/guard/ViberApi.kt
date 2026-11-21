@@ -57,6 +57,32 @@ object ViberApi {
         val number: String?,
     )
 
+    /** Contact card from /contact (provider v22+). */
+    data class Contact(
+        val id: Long,             // contact id (photo URIs reference this)
+        val number: String?,
+        val displayName: String?,
+        val photoAvailable: Boolean,
+        val photoMime: String?,
+        val photoUri: String?,
+        val chatId: Long?,
+    )
+
+    /** Contact card lookup by chat id (build v22+; null on older builds). */
+    fun contactByChat(ctx: Context, chatId: Long): Contact? {
+        val arr = query(ctx, "$BASE/contact?chat_id=$chatId") ?: return null
+        val o = elements(arr).firstOrNull() ?: return null
+        return Contact(
+            id = o.optLong("id"),
+            number = o.optString("number").takeIf { it.isNotEmpty() },
+            displayName = o.optString("display_name").takeIf { it.isNotEmpty() },
+            photoAvailable = o.optBoolean("photo_available"),
+            photoMime = o.optString("photo_mime").takeIf { it.isNotEmpty() },
+            photoUri = o.optString("photo_uri").takeIf { it.isNotEmpty() },
+            chatId = if (o.has("chat_id")) o.optLong("chat_id") else null,
+        )
+    }
+
     /**
      * Normalises `data` array elements. /chats and /messages return nested
      * objects, but /events returns each element as a JSON-encoded string —

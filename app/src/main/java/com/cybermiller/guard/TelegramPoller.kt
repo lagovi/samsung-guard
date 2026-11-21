@@ -151,7 +151,7 @@ object TelegramPoller {
                 if (chat == null) {
                     TelegramClient.sendText("❌ Чат $viberChatId не найден в Viber")
                 } else {
-                    sendContactInfo(chat)
+                    sendContactInfo(ctx, chat)
                 }
             }
             "viber_read" -> {
@@ -287,13 +287,34 @@ object TelegramPoller {
         }
     }
 
-    /** Contact card: everything the provider knows about the chat's counterpart. */
-    private fun sendContactInfo(chat: ViberApi.Chat) {
+    /** Contact card: everything the provider knows, avatar photo embedded. */
+    private fun sendContactInfo(ctx: Context, chat: ViberApi.Chat) {
         val sdf = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault())
+        val contact = ViberApi.contactByChat(ctx, chat.chatId)
+
+        val attach = ArrayList<Pair<String, java.io.File>>()
+        val photoUri = contact?.photoUri
+        if (contact?.photoAvailable == true && photoUri != null) {
+            try {
+                val dir = java.io.File(ctx.cacheDir, "avatars").apply { mkdirs() }
+                val f = java.io.File(dir, "avatar_${contact.id}." +
+                    (contact.photoMime?.substringAfter('/') ?: "jpg"))
+                ctx.contentResolver.openInputStream(android.net.Uri.parse(photoUri))?.use { input ->
+                    f.outputStream().use { input.copyTo(it) }
+                }
+                if (f.length() > 0) attach.add("p0" to f) else f.delete()
+            } catch (t: Throwable) {
+                Log.w(TAG, "avatar download failed: ${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+
+        val name = contact?.displayName ?: chat.title.ifBlank { "—" }
+        val number = contact?.number ?: chat.number
         val md = buildString {
             append("**👤 Контакт**\n\n")
-            append("**Имя:** ${chat.title.ifBlank { "—" }}\n")
-            append("**Телефон:** `${chat.number ?: "—"}`\n")
+            if (attach.isNotEmpty()) append("![](tg://photo?id=p0)\n\n")
+            append("**Имя:** $name\n")
+            append("**Телефон:** `${number ?: "—"}`\n")
             append("**chat_id:** ${chat.chatId} (type ${chat.type})\n")
             if (chat.lastText != null || chat.lastTs > 0) {
                 append("**Последнее сообщение:** `${sdf.format(java.util.Date(chat.lastTs))}`")
@@ -301,9 +322,9 @@ object TelegramPoller {
                 append("\n")
             }
             if (chat.unread > 0) append("**Непрочитанных:** ${chat.unread}\n")
-            append("\n_(аватар профиля недоступен: провайдер v20 не отдаёт контактные данные — нужен метод /contact в сборке)_")
+            if (attach.isEmpty()) append("\n_(фото профиля недоступно)_")
         }
-        TelegramClient.sendRich(md)
+        TelegramClient.sendRich(md, null, attach)
     }
 
     /** Registers the photo for upload and substitutes its per-chunk media id. */
