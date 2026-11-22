@@ -273,15 +273,14 @@ object HealthMonitor {
             val panels = buildList {
                 add(Panel("🔋 Батарея, %", "%", Color.rgb(76, 217, 100),
                     samples.map { it.battery.toFloat() }, fixedMax = 100f))
-                add(Panel("🌡 Температура батареи, °C", "°C", Color.rgb(255, 149, 0),
-                    samples.map { it.battTemp / 10f }))
-                if (samples.any { it.socTemp > 0 }) add(Panel("🌡 Температура CPU, °C", "°C",
-                    Color.rgb(255, 87, 34),
-                    samples.map { if (it.socTemp > 0) it.socTemp / 10f else Float.NaN }))
                 add(Panel("💾 Свободно /data, ГБ", " ГБ", Color.rgb(90, 200, 250),
                     samples.map { it.storageFreeMb / 1024f }))
                 add(Panel("🧠 Свободно RAM, МБ", " МБ", Color.rgb(175, 122, 255),
                     samples.map { it.ramFreeMb.toFloat() }))
+                // CPU temp right above CPU load — they belong together
+                if (samples.any { it.socTemp > 0 }) add(Panel("🌡 Температура CPU, °C", "°C",
+                    Color.rgb(255, 87, 34),
+                    samples.map { if (it.socTemp > 0) it.socTemp / 10f else Float.NaN }))
                 if (hasCpuLoad) add(Panel("🧮 Загрузка CPU, %", "%",
                     Color.rgb(255, 76, 76),
                     samples.map { if (it.cpuLoadPct >= 0) it.cpuLoadPct.toFloat() else Float.NaN },
@@ -410,15 +409,17 @@ object HealthMonitor {
                 }
                 canvas.drawPath(path, linePaint)
 
-                // min / max point markers; a marker coinciding with the newest
-                // point is skipped — the last-value label already covers it
-                val lastIdx = samples.size - 1
+                // min / max point markers; a marker whose value equals the
+                // newest value is skipped — the last-value label already
+                // covers it (and the two labels would just overlap)
+                val lastV0 = p.values.last()
                 val valid = p.values.withIndex().filter { !it.value.isNaN() }
                 if (valid.map { it.value }.distinct().size > 1) {
                     val maxIdx = valid.maxByOrNull { it.value }!!.index
                     val minIdx = valid.minByOrNull { it.value }!!.index
                     for ((idx, isMax) in listOf(maxIdx to true, minIdx to false)) {
-                        if (idx < 0 || idx == lastIdx) continue
+                        if (idx < 0) continue
+                        if (!lastV0.isNaN() && p.values[idx] == lastV0) continue
                         if (!isMax && idx == maxIdx) continue   // flat range, one marker is enough
                         val px = x(samples[idx].ts); val py = y(p.values[idx])
                         canvas.drawCircle(px, py, 4f, dotPaint)
