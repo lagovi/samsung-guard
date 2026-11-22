@@ -29,6 +29,9 @@ import java.util.concurrent.TimeUnit
  */
 object ViberAnalysis {
     private const val TAG = "GuardViberAn"
+
+    /** The built-in system prompt — shown/edited by the owner via /prompt. */
+    fun defaultPrompt(): String = SYS_PROMPT
     private const val QUIET_MS = 35_000L        // silence that ends a burst
     private const val MAX_WAIT_MS = 180_000L    // hard ceiling since the first msg
     private const val MAX_BATCH = 12            // flush immediately past this
@@ -123,6 +126,7 @@ object ViberAnalysis {
 Не выдумывай факты. Если данных мало — в рекомендации скажи, что именно уточнить."""
 
     private fun analyze(ctx: Context, chatId: Long, batch: List<ViberApi.Event>) {
+        val sysPrompt = PromptStore.get(ctx, PromptStore.VIBER, SYS_PROMPT)
         val contact = ViberApi.contactByChat(ctx, chatId)
         val who = contact?.displayName
             ?: batch.first().sender?.takeIf { it.isNotBlank() }
@@ -156,7 +160,7 @@ object ViberAnalysis {
         }
         Log.i(TAG, "analyzing chat=$chatId new=${batch.size} tail=${tail.size}")
 
-        val content = LlmClient.chat(SYS_PROMPT, user, maxTokens = 700)
+        val content = LlmClient.chat(sysPrompt, user, maxTokens = 700)
         if (content.isNullOrBlank()) {
             TelegramClient.sendText(
                 "⚠️ Не удалось проанализировать входящие Viber («$who», ${batch.size} сообщ.) — LLM недоступен")

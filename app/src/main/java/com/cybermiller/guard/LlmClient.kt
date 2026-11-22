@@ -19,6 +19,9 @@ object LlmClient {
     /** True when an API key is configured — gates the whole LLM stage. */
     fun available(): Boolean = KEY.isNotBlank()
 
+    /** The built-in SMS triage prompt — shown/edited by the owner via /prompt. */
+    fun defaultSmsPrompt(): String = SMS_SYS_PROMPT
+
     private const val SMS_SYS_PROMPT = """Ты — triage-ассистент для входящих SMS.
 Для каждого сообщения реши:
 - "keep" — важное/личное/полезное, оставить;
@@ -33,7 +36,7 @@ object LlmClient {
         }
         Log.i(TAG, "LLM request for $address")
         val content = chat(
-            SMS_SYS_PROMPT,
+            PromptStore.get(ctx, PromptStore.SMS, SMS_SYS_PROMPT),
             "SMS from $address:\n$body",
             maxTokens = 200,
         ) ?: return Verdict("keep", "LLM недоступен (см. лог)", "low")

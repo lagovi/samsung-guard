@@ -148,6 +148,8 @@ object TelegramClient {
                     .put("description", "Справка"))
                 put(JSONObject().put("command", "health")
                     .put("description", "Состояние телефона: текущие значения + графики"))
+                put(JSONObject().put("command", "prompt")
+                    .put("description", "Промпты нейроанализа: просмотр и правка"))
             })
         }
         httpPost("setMyCommands", payload)

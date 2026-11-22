@@ -21,6 +21,9 @@ object TelegramPoller {
     /** tg chat id -> Viber chat id awaiting an owner reply typed in Telegram. */
     @Volatile private var awaitingReply = mutableMapOf<Long, Long>()
 
+    /** chatId → prompt name being edited via ForceReply (see /prompt edit). */
+    @Volatile private var awaitingPromptEdit = mutableMapOf<Long, String>()
+
     private fun ownerChatId(): Long? = CHAT.toLongOrNull()
 
     fun start(ctx: Context) {
@@ -77,9 +80,14 @@ object TelegramPoller {
             TelegramClient.sendText("🛡 Guard бот.\n" +
                 "Команды:\n" +
                 "• /health — текущее состояние телефона + графики за 14 дней\n" +
+                "• /prompt — смотреть и править промпты нейроанализа\n" +
                 "Кнопки под сообщениями Viber:\n" +
                 "• «Прочитать весь диалог» — профиль контакта + вся история одним сообщением\n" +
                 "• «Ответить» — введите следующее сообщение в этом чате, оно уйдёт в Viber штатным движком")
+            return
+        }
+        if (text.startsWith("/prompt")) {
+            handlePromptCommand(ctx, text)
             return
         }
         if (text.startsWith("/health")) {
@@ -91,6 +99,23 @@ object TelegramPoller {
             }.start()
             return
         }
+        // A ForceReply bound by "/prompt edit <name>" carries the new prompt text.
+        val promptName = awaitingPromptEdit.remove(chatId)
+        if (promptName != null) {
+            if (text.startsWith("/prompt cancel")) {
+                TelegramClient.sendText("Редактирование промпта отменено.")
+                return
+            }
+            if (text.isBlank()) {
+                TelegramClient.sendText("Пустой текст — редактирование промпта «$promptName» отменено.")
+                return
+            }
+            PromptStore.set(ctx, promptName, text)
+            TelegramClient.sendText("✅ Промпт «$promptName» сохранён (${text.length} символов). " +
+                "Применится к следующим запросам нейросети.")
+            Log.i(TAG, "prompt '$promptName' updated (${text.length} chars)")
+            return
+        }
         val viberChatId = awaitingReply.remove(chatId) ?: return
         if (text.isBlank()) return
         if (ViberApi.send(ctx, viberChatId, text)) {
@@ -99,6 +124,70 @@ object TelegramPoller {
             TelegramClient.sendText("❌ Не удалось отправить ответ в Viber (чат $viberChatId)")
         }
     }
+
+    /** /prompt — list, /prompt <name> — show, /prompt edit <name> — ForceReply edit,
+     *  /prompt reset <name> — back to the built-in default. Names: viber, sms. */
+    private fun handlePromptCommand(ctx: Context, text: String) {
+        val t = text.split(Regex("\\s+"))
+        val name = t.getOrNull(1)
+        val action = t.getOrNull(2)
+        if (name == null) {
+            val sb = StringBuilder("🧠 Промпты нейроанализа:\n")
+            for (p in PromptStore.ALL) {
+                val def = defaultPrompt(p)
+                val cur = PromptStore.get(ctx, p, def)
+                val preview = cur.trim().lineSequence().first().take(70)
+                sb.append("\n• <b>$p</b>")
+                    .append(if (PromptStore.isOverridden(ctx, p, def)) " (переопределён)" else " (по умолчанию)")
+                    .append(" — ").append(preview).append("…")
+            }
+            sb.append("\n\nПросмотр: /prompt viber · /prompt sms\n" +
+                "Правка: /prompt edit viber — пришлю текущий текст, ответьте на него новым.\n" +
+                "Сброс к стандарту: /prompt reset viber · /prompt reset sms\n" +
+                "Отменить правку: /prompt cancel")
+            TelegramClient.sendText(sb.toString())
+            return
+        }
+        if (name !in PromptStore.ALL) {
+            TelegramClient.sendText("Нет промпта «$name». Доступны: ${PromptStore.ALL.joinToString(", ")}.")
+            return
+        }
+        val def = defaultPrompt(name)
+        when (action) {
+            null -> TelegramClient.sendText(
+                "🧠 Промпт <b>$name</b> " +
+                (if (PromptStore.isOverridden(ctx, name, def)) "(переопределён)" else "(по умолчанию)") +
+                ":\n\n" + escapeHtml(PromptStore.get(ctx, name, def)))
+            "edit" -> {
+                awaitingPromptEdit[ownerChatId() ?: 0L] = name
+                post("sendMessage", JSONObject().apply {
+                    put("chat_id", CHAT)
+                    put("text", "🧠 Редактирование промпта <b>$name</b>.\n" +
+                        "Текущий текст:\n\n" + escapeHtml(PromptStore.get(ctx, name, def)) +
+                        "\n\nПришлите НОВЫЙ текст ответом на это сообщение (/prompt cancel — отмена).")
+                    put("parse_mode", "HTML")
+                    put("reply_markup", JSONObject().apply {
+                        put("force_reply", true)
+                        put("input_field_placeholder", "Новый текст промпта…")
+                    })
+                })
+            }
+            "reset" -> {
+                PromptStore.reset(ctx, name)
+                TelegramClient.sendText("✅ Промпт «$name» сброшен к встроенному.")
+            }
+            else -> TelegramClient.sendText("Не понял «$action». Форматы: /prompt $name · /prompt edit $name · /prompt reset $name")
+        }
+    }
+
+    private fun defaultPrompt(name: String): String = when (name) {
+        PromptStore.VIBER -> ViberAnalysis.defaultPrompt()
+        PromptStore.SMS -> LlmClient.defaultSmsPrompt()
+        else -> ""
+    }
+
+    private fun escapeHtml(s: String): String =
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     private fun handleCallback(ctx: Context, cb: JSONObject) {
         val data = cb.optString("data", "")
