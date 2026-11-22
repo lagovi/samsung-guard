@@ -342,7 +342,9 @@ object HealthMonitor {
                 dayMs, 2 * dayMs, 7 * dayMs, 14 * dayMs,
             ).first { span / it <= 12 }
             val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
-            val ticks = ArrayList<Pair<Long, String>>()
+            // brightness tier of each tick: 0 = hour/day mark (brightest),
+            // 1 = half-hour, 2 = quarter-hour and finer (dimmest)
+            val ticks = ArrayList<Triple<Long, String, Int>>()
             val tc = Calendar.getInstance()
             tc.timeInMillis = t0
             if (stepMs < dayMs) {
@@ -355,10 +357,14 @@ object HealthMonitor {
             while (tc.timeInMillis <= t1) {
                 val ts = tc.timeInMillis
                 val midnight = tc.get(Calendar.HOUR_OF_DAY) == 0
-                ticks.add(ts to when {
-                    stepMs >= dayMs || midnight -> dayFmt.format(Date(ts))
-                    else -> timeFmt.format(Date(ts))
-                })
+                val lbl = if (stepMs >= dayMs || midnight) dayFmt.format(Date(ts))
+                          else timeFmt.format(Date(ts))
+                val tier = when (tc.get(Calendar.MINUTE)) {
+                    0 -> 0
+                    30 -> 1
+                    else -> 2
+                }
+                ticks.add(Triple(ts, lbl, tier))
                 tc.add(Calendar.MILLISECOND, stepMs.toInt())
             }
 
@@ -380,10 +386,19 @@ object HealthMonitor {
                 fun x(ts: Long) = plotL + (ts - t0).toFloat() / span * (plotR - plotL)
                 fun y(v: Float) = plotB - (v - lo) / range * (plotB - plotT)
 
-                // shared time axis grid (labels are drawn once at the bottom)
-                for ((ts, _) in ticks) {
-                    val tx = x(ts)
-                    if (tx >= plotL && tx <= plotR) canvas.drawLine(tx, plotT, tx, plotB, gridPaint)
+                // shared time axis grid (labels are drawn once at the bottom);
+                // brightness by tier, x pixel-snapped so equal-tier lines look
+                // identical (fractional x anti-aliases and looks dimmer)
+                for ((ts, _, tier) in ticks) {
+                    val tx = Math.round(x(ts)).toFloat()
+                    if (tx >= plotL && tx <= plotR) {
+                        gridPaint.color = when (tier) {
+                            0 -> Color.rgb(100, 106, 120)
+                            1 -> Color.rgb(70, 76, 88)
+                            else -> Color.rgb(50, 55, 66)
+                        }
+                        canvas.drawLine(tx, plotT, tx, plotB, gridPaint)
+                    }
                 }
 
                 // sleep bands: vertical stripes where the device was suspended
@@ -445,11 +460,17 @@ object HealthMonitor {
                 }
             }
 
-            // one label row for the shared time axis
-            for ((ts, lbl) in ticks) {
-                val tx = padL + (ts - t0).toFloat() / span * (w - padR - padL)
+            // one label row for the shared time axis, same brightness tiers
+            val axisPaint = Paint(labelPaint)
+            for ((ts, lbl, tier) in ticks) {
+                val tx = Math.round(padL + (ts - t0).toFloat() / span * (w - padR - padL)).toFloat()
                 if (tx > padL + 6f && tx < w - padR - 6f) {
-                    canvas.drawText(lbl, tx - labelPaint.measureText(lbl) / 2f, h - 12f, labelPaint)
+                    axisPaint.color = when (tier) {
+                        0 -> Color.rgb(200, 206, 218)
+                        1 -> Color.rgb(160, 166, 178)
+                        else -> Color.rgb(125, 130, 142)
+                    }
+                    canvas.drawText(lbl, tx - axisPaint.measureText(lbl) / 2f, h - 12f, axisPaint)
                 }
             }
 
