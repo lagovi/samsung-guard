@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.os.BatteryManager
 import android.os.PowerManager
 import android.os.StatFs
@@ -300,6 +301,18 @@ object HealthMonitor {
                 strokeWidth = 3f; style = Paint.Style.STROKE
             }
             val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+            val platePaint = Paint().apply { color = Color.argb(165, 22, 24, 30) }
+
+            // Value label on a semi-transparent plate, so the text stays
+            // readable where it lands on the plotted line (CPU frequency
+            // comb, spikes — the digits just disappear into the line).
+            fun label(text: String, tx: Float, ty: Float) {
+                val fm = labelPaint.fontMetrics
+                canvas.drawRoundRect(
+                    RectF(tx - 5f, ty + fm.ascent - 4f, tx + labelPaint.measureText(text) + 5f, ty + fm.descent + 4f),
+                    6f, 6f, platePaint)
+                canvas.drawText(text, tx, ty, labelPaint)
+            }
 
             val dayFmt = SimpleDateFormat("dd.MM", Locale.getDefault())
 
@@ -357,10 +370,14 @@ object HealthMonitor {
                         val px = x(samples[idx].ts); val py = y(p.values[idx])
                         canvas.drawCircle(px, py, 4f, dotPaint)
                         val tx = if (px > plotR - 120f) px - 84f else px + 10f
-                        val ty = if (isMax) py - 12f
-                        else if (py > plotB - 26f) py - 12f
-                        else py + 26f
-                        canvas.drawText(fmt(p, p.values[idx]), tx, ty, labelPaint)
+                        val ty = when {
+                            // near the top edge the text would sit on the title — put it below
+                            isMax && py < plotT + 30f -> py + 32f
+                            isMax -> py - 12f
+                            py > plotB - 26f -> py - 12f
+                            else -> py + 26f
+                        }
+                        label(fmt(p, p.values[idx]), tx, ty)
                     }
                 }
 
@@ -370,7 +387,7 @@ object HealthMonitor {
                 if (!lastV.isNaN()) {
                     val lx = x(last.ts); val ly = y(lastV)
                     canvas.drawCircle(lx, ly, 5f, dotPaint)
-                    canvas.drawText(fmt(p, lastV), lx - 70f, ly - 12f, labelPaint)
+                    label(fmt(p, lastV), lx - 70f, ly - 12f)
                 }
 
                 // day ticks
