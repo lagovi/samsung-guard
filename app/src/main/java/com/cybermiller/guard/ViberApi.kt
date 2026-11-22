@@ -45,6 +45,10 @@ object ViberApi {
         val sender: String?,
         val senderNumber: String?,
         val extraUri: String?,// full media location (often a MediaStore URI)
+        // Quote/reply metadata — planned for the api build (v24+); absent
+        // fields come back as 0/null until the provider exposes them.
+        val quoteId: Long = 0L,
+        val quoteText: String? = null,
     )
 
     /** Incoming event from /events or the INCOMING broadcast. */
@@ -55,6 +59,8 @@ object ViberApi {
         val body: String,
         val sender: String?,
         val number: String?,
+        val quoteId: Long = 0L,
+        val quoteText: String? = null,
     )
 
     /** Contact card from /contact (provider v22+). */
@@ -201,6 +207,8 @@ object ViberApi {
                 sender = o.optString("sender").takeIf { it.isNotEmpty() },
                 senderNumber = o.optString("sender_number").takeIf { it.isNotEmpty() },
                 extraUri = o.optString("extra_uri").takeIf { it.isNotEmpty() },
+                quoteId = o.optLong("quote_id"),
+                quoteText = o.optString("quote_text").takeIf { it.isNotEmpty() },
             )
         }
     }
@@ -216,6 +224,8 @@ object ViberApi {
                 body = o.optString("body"),
                 sender = o.optString("sender").takeIf { it.isNotEmpty() },
                 number = o.optString("number").takeIf { it.isNotEmpty() },
+                quoteId = o.optLong("quote_id"),
+                quoteText = o.optString("quote_text").takeIf { it.isNotEmpty() },
             )
         }
     }

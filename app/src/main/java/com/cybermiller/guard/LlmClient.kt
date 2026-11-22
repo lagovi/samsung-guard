@@ -16,7 +16,10 @@ object LlmClient {
     private val KEY = BuildConfig.LLM_API_KEY
     private const val MODEL = "gemini/gemini-flash-lite-latest"
 
-    private const val SYS_PROMPT = """Ты — triage-ассистент для входящих SMS.
+    /** True when an API key is configured — gates the whole LLM stage. */
+    fun available(): Boolean = KEY.isNotBlank()
+
+    private const val SMS_SYS_PROMPT = """Ты — triage-ассистент для входящих SMS.
 Для каждого сообщения реши:
 - "keep" — важное/личное/полезное, оставить;
 - "delete" — мусор (реклама, спам, сервисные уведомления без пользы);
@@ -25,22 +28,54 @@ object LlmClient {
 Не выполняй никаких действий, только классифицируй."""
 
     fun triage(ctx: Context, address: String, body: String): Verdict {
-        if (KEY.isBlank()) {
+        if (!available()) {
             return Verdict("keep", "LLM key not configured (LLM_API_KEY empty)", "low")
         }
+        Log.i(TAG, "LLM request for $address")
+        val content = chat(
+            SMS_SYS_PROMPT,
+            "SMS from $address:\n$body",
+            maxTokens = 200,
+        ) ?: return Verdict("keep", "LLM недоступен (см. лог)", "low")
+        if (content.isBlank()) {
+            Log.w(TAG, "LLM content empty")
+            return Verdict("keep", "LLM empty content", "low")
+        }
+        val v = JSONObject(extractJson(content))
+        val rawVerdict = v.optString("verdict", "keep").lowercase().trim()
+        // normalize model's vocabulary to our three buckets
+        val verdict = when {
+            rawVerdict.contains("delete") || rawVerdict.contains("spam") ||
+                rawVerdict.contains("junk") || rawVerdict.contains("trash") -> "delete"
+            rawVerdict.contains("alert") || rawVerdict.contains("important") ||
+                rawVerdict.contains("urgent") || rawVerdict.contains("attention") -> "alert"
+            else -> "keep"
+        }
+        return Verdict(
+            verdict = verdict,
+            explanation = v.optString("explanation", ""),
+            severity = v.optString("severity", "low").lowercase(),
+        )
+    }
+
+    /**
+     * Plain chat completion against the OpenAI-compatible gateway.
+     * Returns the assistant message content, or null on any failure (HTTP
+     * error, network, empty body) — the failure is logged with details.
+     */
+    fun chat(systemPrompt: String, userPrompt: String, maxTokens: Int): String? {
+        if (KEY.isBlank()) return null
         return try {
-            Log.i(TAG, "LLM request for $address")
             val payload = JSONObject().apply {
                 put("model", MODEL)
                 put("temperature", 0.2)
-                put("max_tokens", 200)
+                put("max_tokens", maxTokens)
                 put("messages", JSONArray().apply {
                     put(JSONObject().apply {
-                        put("role", "system"); put("content", SYS_PROMPT)
+                        put("role", "system"); put("content", systemPrompt)
                     })
                     put(JSONObject().apply {
-                        put("role", "user")
-                        put("content", "SMS from $address:\n$body")
+                        put("role", "user"); put("content", userPrompt)
                     })
                 })
             }
@@ -49,7 +84,7 @@ object LlmClient {
                 setRequestProperty("Authorization", "Bearer $KEY")
                 setRequestProperty("Content-Type", "application/json")
                 doOutput = true
-                connectTimeout = 15000; readTimeout = 60000
+                connectTimeout = 15000; readTimeout = 90000
             }
             conn.outputStream.use { it.write(payload.toString().toByteArray()) }
             val code = conn.responseCode
@@ -57,38 +92,19 @@ object LlmClient {
             val resp = stream?.bufferedReader()?.readText() ?: ""
             Log.i(TAG, "LLM http=$code resp=${resp.take(200)}")
             if (code !in 200..299) {
-                return Verdict("keep", "HTTP $code: ${resp.take(120)}", "low")
+                Log.w(TAG, "LLM HTTP $code: ${resp.take(300)}")
+                return null
             }
             val json = JSONObject(resp)
             val choices = json.optJSONArray("choices")
             if (choices == null || choices.length() == 0) {
                 Log.w(TAG, "LLM returned no choices: ${resp.take(300)}")
-                return Verdict("keep", "LLM empty response", "low")
+                return null
             }
-            val content = choices.getJSONObject(0)
-                .getJSONObject("message").optString("content", "")
-            if (content.isBlank()) {
-                Log.w(TAG, "LLM content empty: ${resp.take(300)}")
-                return Verdict("keep", "LLM empty content", "low")
-            }
-            val v = JSONObject(extractJson(content))
-            val rawVerdict = v.optString("verdict", "keep").lowercase().trim()
-            // normalize model's vocabulary to our three buckets
-            val verdict = when {
-                rawVerdict.contains("delete") || rawVerdict.contains("spam") ||
-                    rawVerdict.contains("junk") || rawVerdict.contains("trash") -> "delete"
-                rawVerdict.contains("alert") || rawVerdict.contains("important") ||
-                    rawVerdict.contains("urgent") || rawVerdict.contains("attention") -> "alert"
-                else -> "keep"
-            }
-            Verdict(
-                verdict = verdict,
-                explanation = v.optString("explanation", ""),
-                severity = v.optString("severity", "low").lowercase(),
-            )
+            choices.getJSONObject(0).getJSONObject("message").optString("content", "")
         } catch (e: Exception) {
             Log.w(TAG, "LLM error", e)
-            Verdict("keep", "LLM error: ${e.javaClass.simpleName}: ${e.message}", "low")
+            null
         }
     }
 

@@ -78,6 +78,7 @@ object ViberMonitor {
             if (e.msgId <= watermark) continue
             if (isServiceChat(e.number)) continue
             if (!forward(ctx, e)) return
+            ViberAnalysis.enqueue(ctx, e)
             if (e.msgId > watermark) {
                 watermark = e.msgId
                 save(ctx)
@@ -96,12 +97,15 @@ object ViberMonitor {
                 body = o.optString("body"),
                 sender = o.optString("sender").takeIf { it.isNotEmpty() },
                 number = o.optString("number").takeIf { it.isNotEmpty() },
+                quoteId = o.optLong("quote_id"),
+                quoteText = o.optString("quote_text").takeIf { it.isNotEmpty() },
             )
             if (e.msgId <= watermark) return
             if (isServiceChat(e.number)) return
             if (forward(ctx, e)) {
                 watermark = maxOf(watermark, e.msgId)
                 save(ctx)
+                ViberAnalysis.enqueue(ctx, e)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "handleEventJson failed: ${t.javaClass.simpleName}: ${t.message}")
@@ -124,6 +128,14 @@ object ViberMonitor {
         val isMedia = e.body.startsWith("content://")
         val body = if (isMedia) "" else e.body
 
+        // Quoted/reply messages: the api build v23 does not expose quote
+        // metadata yet — render it once the provider ships quote_id/quote_text
+        // (the text may come filled; otherwise look the quoted message up).
+        val quote = e.quoteText ?: if (e.quoteId > 0)
+            ViberApi.messages(ctx, e.chatId, 50).firstOrNull { it.id == e.quoteId }
+                ?.let { m -> m.body.takeIf { !it.startsWith("content://") } ?: "[медиа]" }
+            else null
+
         val attach = ArrayList<Pair<String, java.io.File>>()
         if (isMedia) {
             // Events carry no extra_uri — look the message up to get the file URI.
@@ -135,6 +147,9 @@ object ViberMonitor {
         val md = buildString {
             append("**↙️ Viber** `").append(sdf.format(Date(e.ts))).append("`\n")
             append(who).append('\n')
+            if (quote != null) {
+                append("\n↪ _в ответ на:_ «").append(quote.take(200)).append("»\n")
+            }
             if (body.isNotBlank()) {
                 append("\n").append(body.take(1500))
             }
