@@ -31,13 +31,17 @@ object ViberMonitor {
 
     @Volatile private var watermark: Long = 0L
 
+    /** Dedup watermark for EDIT events (their ts is independent of message ids). */
+    @Volatile private var editWatermark: Long = 0L
+
     fun start(ctx: Context) {
         if (running) return
         running = true
         val appCtx = ctx.applicationContext
         val p = prefs(appCtx)
         watermark = p.getLong("viber_fwd_max_id", -1L)
-        Log.i(TAG, "viber monitor start, stored watermark=$watermark")
+        editWatermark = p.getLong("viber_edit_max_ts", 0L)
+        Log.i(TAG, "viber monitor start, stored watermark=$watermark editTs=$editWatermark")
         Thread {
             try {
                 if (watermark < 0) prime(appCtx)
@@ -75,6 +79,10 @@ object ViberMonitor {
         // /events is ordered oldest → newest; stop at the first failed send so
         // ordering is kept and the failed message is retried on the next tick.
         for (e in ViberApi.events(ctx)) {
+            if (e.isEdit) {
+                handleEdit(ctx, e)
+                continue
+            }
             if (e.msgId <= watermark) continue
             if (isServiceChat(e.number)) continue
             if (!forward(ctx, e)) return
@@ -99,7 +107,12 @@ object ViberMonitor {
                 number = o.optString("number").takeIf { it.isNotEmpty() },
                 quoteId = o.optLong("quote_id"),
                 quoteText = o.optString("quote_text").takeIf { it.isNotEmpty() },
+                isEdit = o.optString("type") == "edit",
             )
+            if (e.isEdit) {
+                handleEdit(ctx, e)
+                return
+            }
             if (e.msgId <= watermark) return
             if (isServiceChat(e.number)) return
             if (forward(ctx, e)) {
@@ -114,6 +127,45 @@ object ViberMonitor {
 
     /** Viber's own service/subscribe bot has number "Viber" — not the owner's traffic. */
     private fun isServiceChat(number: String?): Boolean = number == null || number == "Viber"
+
+    /**
+     * Edit event (api build v29): msgId points at the edited ORIGINAL message,
+     * body is the new text. Deduplicated by the edit ts (independent of the
+     * message-id watermark — the original is usually long since forwarded).
+     * An edit of a not-yet-forwarded message needs no announcement: the
+     * forward will pick the fresh text up from /messages on its own pass.
+     */
+    private fun handleEdit(ctx: Context, e: ViberApi.Event) {
+        if (e.ts <= editWatermark) return
+        editWatermark = e.ts
+        saveEditTs(ctx)
+        if (e.msgId > watermark) return   // not forwarded yet — nothing to amend
+        val m = ViberApi.messages(ctx, e.chatId, 200).firstOrNull { it.id == e.msgId }
+        val who = buildString {
+            if (!m?.sender.isNullOrBlank()) append(m?.sender)
+            if (!m?.senderNumber.isNullOrBlank()) {
+                if (isNotEmpty()) append(" ")
+                append(m?.senderNumber)
+            }
+        }.ifBlank { "чат ${e.chatId}, сообщение #${e.msgId}" }
+        val isMedia = m?.body?.startsWith("content://") == true
+        val newText = when {
+            isMedia -> "_(медиа)_"
+            !m?.body.isNullOrBlank() -> m!!.body
+            else -> e.body.takeIf { !it.startsWith("content://") } ?: "_(медиа)_"
+        }
+        val md = buildString {
+            append("**✏️ В Viber отредактировано** `").append(sdf.format(Date(e.ts))).append("`\n")
+            append(who).append(" (сообщение #").append(e.msgId).append(")\n\n")
+            append(newText.take(1500))
+        }
+        TelegramClient.sendViberAlert(ctx, e.chatId, md)
+        Log.i(TAG, "edit of msg #${e.msgId} chat=${e.chatId} announced")
+    }
+
+    private fun saveEditTs(ctx: Context) {
+        prefs(ctx).edit().putLong("viber_edit_max_ts", editWatermark).apply()
+    }
 
     /** Builds the rich message and hands it to Telegram. True = accepted. */
     private fun forward(ctx: Context, e: ViberApi.Event): Boolean {

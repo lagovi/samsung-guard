@@ -57,6 +57,7 @@ object ViberAnalysis {
 
     /** Called by ViberMonitor after a message was successfully forwarded. */
     fun enqueue(ctx: Context, e: ViberApi.Event) {
+        if (e.isEdit) return   // edits are announced by ViberMonitor, not analysed
         if (!LlmClient.available()) {
             if (!keyMissingLogged) {
                 keyMissingLogged = true
@@ -140,8 +141,10 @@ object ViberAnalysis {
             val role = if (m.dir == "out") "владелец" else "клиент"
             val text = if (m.body.startsWith("content://")) "[медиа]" else m.body
             val quote = m.quoteText?.let { " (в ответ на «${it.take(80)}»)" } ?: ""
+            val edited = if (m.editedTs > 0) " ✏️(текст отредактирован)" else ""
             tailSb.append('[').append(sdf.format(Date(m.ts))).append("] ").append(role)
-                .append(quote).append(": ").append(text.ifBlank { "(пусто)" }.take(500)).append('\n')
+                .append(quote).append(edited).append(": ")
+                .append(text.ifBlank { "(пусто)" }.take(500)).append('\n')
         }
 
         val newSb = StringBuilder()

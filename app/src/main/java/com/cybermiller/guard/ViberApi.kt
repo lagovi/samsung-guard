@@ -48,10 +48,11 @@ object ViberApi {
         val sender: String?,
         val senderNumber: String?,
         val extraUri: String?,// full media location (often a MediaStore URI)
-        // Quote/reply metadata — planned for the api build (v24+); absent
-        // fields come back as 0/null until the provider exposes them.
+        // Quote/reply metadata (api build v24+) and the edit timestamp
+        // (v29+); absent fields come back as 0/null on older builds.
         val quoteId: Long = 0L,
         val quoteText: String? = null,
+        val editedTs: Long = 0L,
     )
 
     /** Incoming event from /events or the INCOMING broadcast. */
@@ -64,6 +65,9 @@ object ViberApi {
         val number: String?,
         val quoteId: Long = 0L,
         val quoteText: String? = null,
+        // v29: edit events — msgId points at the EDITED original message,
+        // body carries the new text, ts is the moment of the edit.
+        val isEdit: Boolean = false,
     )
 
     /** Contact card from /contact (provider v22+). */
@@ -214,6 +218,7 @@ object ViberApi {
                 extraUri = o.optString("extra_uri").takeIf { it.isNotEmpty() },
                 quoteId = o.optLong("quote_id"),
                 quoteText = o.optString("quote_text").takeIf { it.isNotEmpty() },
+                editedTs = o.optLong("edited_ts"),
             )
         }
     }
@@ -231,6 +236,7 @@ object ViberApi {
                 number = o.optString("number").takeIf { it.isNotEmpty() },
                 quoteId = o.optLong("quote_id"),
                 quoteText = o.optString("quote_text").takeIf { it.isNotEmpty() },
+                isEdit = o.optString("type") == "edit",
             )
         }
     }

@@ -331,7 +331,8 @@ object TelegramPoller {
                 }
             } else {
                 val body = if (text.isNotBlank()) text.take(800) else "_(пусто)_"
-                lines.add(HistLine(m.ts, "$dir $stamp $body\n\n", null))
+                val edited = if (m.editedTs > 0) " ✏️" else ""
+                lines.add(HistLine(m.ts, "$dir $stamp$edited $body\n\n", null))
             }
         }
 
