@@ -67,7 +67,9 @@ object ViberApi {
         val quoteText: String? = null,
         // v29: edit events — msgId points at the EDITED original message,
         // body carries the new text, ts is the moment of the edit.
+        // v30 adds dir ("in"/"out") — whose message was edited.
         val isEdit: Boolean = false,
+        val dir: String? = null,
     )
 
     /** Contact card from /contact (provider v22+). */
@@ -237,6 +239,7 @@ object ViberApi {
                 quoteId = o.optLong("quote_id"),
                 quoteText = o.optString("quote_text").takeIf { it.isNotEmpty() },
                 isEdit = o.optString("type") == "edit",
+                dir = o.optString("dir").takeIf { it.isNotEmpty() },
             )
         }
     }

@@ -108,6 +108,7 @@ object ViberMonitor {
                 quoteId = o.optLong("quote_id"),
                 quoteText = o.optString("quote_text").takeIf { it.isNotEmpty() },
                 isEdit = o.optString("type") == "edit",
+                dir = o.optString("dir").takeIf { it.isNotEmpty() },
             )
             if (e.isEdit) {
                 handleEdit(ctx, e)
@@ -141,26 +142,32 @@ object ViberMonitor {
         saveEditTs(ctx)
         if (e.msgId > watermark) return   // not forwarded yet — nothing to amend
         val m = ViberApi.messages(ctx, e.chatId, 200).firstOrNull { it.id == e.msgId }
-        val who = buildString {
-            if (!m?.sender.isNullOrBlank()) append(m?.sender)
-            if (!m?.senderNumber.isNullOrBlank()) {
-                if (isNotEmpty()) append(" ")
-                append(m?.senderNumber)
-            }
-        }.ifBlank { "чат ${e.chatId}, сообщение #${e.msgId}" }
         val isMedia = m?.body?.startsWith("content://") == true
         val newText = when {
             isMedia -> "_(медиа)_"
             !m?.body.isNullOrBlank() -> m!!.body
             else -> e.body.takeIf { !it.startsWith("content://") } ?: "_(медиа)_"
         }
-        val md = buildString {
-            append("**✏️ В Viber отредактировано** `").append(sdf.format(Date(e.ts))).append("`\n")
-            append(who).append(" (сообщение #").append(e.msgId).append(")\n\n")
-            append(newText.take(1500))
+        val heading = if (e.dir == "out") {
+            // The owner edited their own outgoing message — name the chat
+            // it was sent to (outgoing /messages rows carry no sender).
+            val label = ViberApi.chats(ctx).firstOrNull { it.chatId == e.chatId }
+                ?.let { it.title + (it.number?.let { n -> " ($n)" } ?: "") } ?: "чат ${e.chatId}"
+            "**✏️ Отредактировано ваше исходящее** `" + sdf.format(Date(e.ts)) + "`\n" +
+                "Кому: $label (сообщение #" + e.msgId + ")\n\n"
+        } else {
+            val who = buildString {
+                if (!m?.sender.isNullOrBlank()) append(m?.sender)
+                if (!m?.senderNumber.isNullOrBlank()) {
+                    if (isNotEmpty()) append(" ")
+                    append(m?.senderNumber)
+                }
+            }.ifBlank { "чат ${e.chatId}, сообщение #${e.msgId}" }
+            "**✏️ В Viber отредактировано** `" + sdf.format(Date(e.ts)) + "`\n" +
+                who + " (сообщение #" + e.msgId + ")\n\n"
         }
-        TelegramClient.sendViberAlert(ctx, e.chatId, md)
-        Log.i(TAG, "edit of msg #${e.msgId} chat=${e.chatId} announced")
+        TelegramClient.sendViberAlert(ctx, e.chatId, heading + newText.take(1500))
+        Log.i(TAG, "edit of msg #${e.msgId} chat=${e.chatId} dir=${e.dir ?: "in"} announced")
     }
 
     private fun saveEditTs(ctx: Context) {
