@@ -107,9 +107,21 @@ object HealthMonitor {
             File("/proc/loadavg").readText().trim().split(" ").first().toFloatOrNull() ?: 0f
         } catch (_: Exception) { 0f }
 
+        // CPU die temperature: the tsens_tz_sensor* zones (0..4 here) report
+        // whole °C on this device, other zone types use millidegrees — detect
+        // the scale and take the hottest of the five on-die sensors.
         val socTemp = try {
-            val t = File("/sys/class/thermal/thermal_zone0/temp").readText().trim().toIntOrNull() ?: 0
-            if (t > 1000) t / 10 else 0     // millidegrees → tenths of °C
+            var best = 0
+            for (i in 0..4) {
+                val t = File("/sys/class/thermal/thermal_zone$i/temp").readText().trim().toIntOrNull() ?: continue
+                val c = when {
+                    t > 10000 -> t / 1000   // millidegrees
+                    t > 200   -> t / 10     // tenths
+                    else      -> t          // whole degrees (tsens)
+                }
+                if (c > best) best = c
+            }
+            best * 10                       // stored as tenths of °C
         } catch (_: Exception) { 0 }
 
         val cpuLoadPct = readCpuLoadPct()
@@ -199,7 +211,7 @@ object HealthMonitor {
             sb.append("📡 Ядра (${freqs.size}): " +
                 freqs.joinToString("/") { "%.1f".format(it / 1000f) } + " ГГц\n")
         }
-        if (s.socTemp > 0) sb.append("🌡 SoC: ${"%.1f".format(s.socTemp / 10.0)}°C\n")
+        if (s.socTemp > 0) sb.append("🌡 Процессор: ${"%.1f".format(s.socTemp / 10.0)}°C\n")
         return sb.toString().trimEnd()
     }
 
@@ -263,6 +275,9 @@ object HealthMonitor {
                     samples.map { it.battery.toFloat() }, fixedMax = 100f))
                 add(Panel("🌡 Температура батареи, °C", "°C", Color.rgb(255, 149, 0),
                     samples.map { it.battTemp / 10f }))
+                if (samples.any { it.socTemp > 0 }) add(Panel("🌡 Температура CPU, °C", "°C",
+                    Color.rgb(255, 87, 34),
+                    samples.map { if (it.socTemp > 0) it.socTemp / 10f else Float.NaN }))
                 add(Panel("💾 Свободно /data, ГБ", " ГБ", Color.rgb(90, 200, 250),
                     samples.map { it.storageFreeMb / 1024f }))
                 add(Panel("🧠 Свободно RAM, МБ", " МБ", Color.rgb(175, 122, 255),
@@ -277,11 +292,13 @@ object HealthMonitor {
             }
 
             val w = 1000
-            val panelH = 245
+            // with 7+ panels each shrinks a bit so the whole picture still
+            // fits a phone screen
+            val panelH = (1500f / panels.size).toInt().coerceIn(190, 245)
             val padL = 20f
             val padR = 150f
             val top = 16f
-            val h = (panels.size * panelH + 32).toInt()
+            val h = (panels.size * panelH + 76).toInt()   // +76 = time-axis row
             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
             canvas.drawColor(Color.rgb(22, 24, 30))
@@ -316,6 +333,36 @@ object HealthMonitor {
 
             val dayFmt = SimpleDateFormat("dd.MM", Locale.getDefault())
 
+            // Shared time axis: adaptive ticks drawn as grid lines on every
+            // panel, with a single label row under the bottom panel.
+            val hourMs = 3600_000L
+            val dayMs = 24 * hourMs
+            val stepMs = longArrayOf(
+                5 * 60_000L, 10 * 60_000L, 15 * 60_000L, 30 * 60_000L,
+                hourMs, 2 * hourMs, 3 * hourMs, 6 * hourMs, 12 * hourMs,
+                dayMs, 2 * dayMs, 7 * dayMs, 14 * dayMs,
+            ).first { span / it <= 12 }
+            val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+            val ticks = ArrayList<Pair<Long, String>>()
+            val tc = Calendar.getInstance()
+            tc.timeInMillis = t0
+            if (stepMs < dayMs) {
+                tc.set(Calendar.MINUTE, 0); tc.set(Calendar.SECOND, 0); tc.set(Calendar.MILLISECOND, 0)
+            } else {
+                tc.set(Calendar.HOUR_OF_DAY, 0); tc.set(Calendar.MINUTE, 0)
+                tc.set(Calendar.SECOND, 0); tc.set(Calendar.MILLISECOND, 0)
+            }
+            if (tc.timeInMillis < t0) tc.add(Calendar.MILLISECOND, stepMs.toInt())
+            while (tc.timeInMillis <= t1) {
+                val ts = tc.timeInMillis
+                val midnight = tc.get(Calendar.HOUR_OF_DAY) == 0
+                ticks.add(ts to when {
+                    stepMs >= dayMs || midnight -> dayFmt.format(Date(ts))
+                    else -> timeFmt.format(Date(ts))
+                })
+                tc.add(Calendar.MILLISECOND, stepMs.toInt())
+            }
+
             panels.forEachIndexed { pi, p ->
                 val y0 = top + pi * panelH
                 val plotL = padL
@@ -333,6 +380,12 @@ object HealthMonitor {
 
                 fun x(ts: Long) = plotL + (ts - t0).toFloat() / span * (plotR - plotL)
                 fun y(v: Float) = plotB - (v - lo) / range * (plotB - plotT)
+
+                // shared time axis grid (labels are drawn once at the bottom)
+                for ((ts, _) in ticks) {
+                    val tx = x(ts)
+                    if (tx >= plotL && tx <= plotR) canvas.drawLine(tx, plotT, tx, plotB, gridPaint)
+                }
 
                 // sleep bands: vertical stripes where the device was suspended
                 for ((b0, b1) in bands) {
@@ -389,20 +442,13 @@ object HealthMonitor {
                     canvas.drawCircle(lx, ly, 5f, dotPaint)
                     label(fmt(p, lastV), lx - 70f, ly - 12f)
                 }
+            }
 
-                // day ticks
-                val cal = Calendar.getInstance()
-                cal.timeInMillis = t0
-                cal.set(Calendar.HOUR_OF_DAY, 0)
-                cal.set(Calendar.MINUTE, 0)
-                cal.set(Calendar.SECOND, 0)
-                while (cal.timeInMillis <= t1) {
-                    val tx = x(cal.timeInMillis)
-                    if (tx > plotL + 30f && tx < plotR - 30f) {
-                        canvas.drawLine(tx, plotT, tx, plotB, gridPaint)
-                        canvas.drawText(dayFmt.format(Date(cal.timeInMillis)), tx - 30f, y0 + panelH - 12f, labelPaint)
-                    }
-                    cal.add(Calendar.DAY_OF_MONTH, 1)
+            // one label row for the shared time axis
+            for ((ts, lbl) in ticks) {
+                val tx = padL + (ts - t0).toFloat() / span * (w - padR - padL)
+                if (tx > padL + 6f && tx < w - padR - 6f) {
+                    canvas.drawText(lbl, tx - labelPaint.measureText(lbl) / 2f, h - 12f, labelPaint)
                 }
             }
 
