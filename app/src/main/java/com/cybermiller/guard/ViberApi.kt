@@ -33,6 +33,9 @@ object ViberApi {
         val lastText: String?,
         val lastDir: String?, // "in"/"out"
         val unread: Int,
+        // Typing status (api build v24+; absent on older builds → 0/false).
+        val typingTs: Long,   // ms of the last "typing" notification
+        val typing: Boolean,  // true = typed within the last ~6 s
     )
 
     /** Message from /messages. */
@@ -188,6 +191,8 @@ object ViberApi {
                 lastText = o.optString("last_text").takeIf { it.isNotEmpty() },
                 lastDir = o.optString("last_dir").takeIf { it.isNotEmpty() },
                 unread = o.optInt("unread"),
+                typingTs = o.optLong("typing_ts"),
+                typing = o.optInt("typing") == 1,
             )
         }
     }

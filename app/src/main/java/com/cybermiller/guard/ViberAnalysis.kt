@@ -25,8 +25,7 @@ import java.util.concurrent.TimeUnit
  * (ViberMonitor) is unaffected — analysis is skipped / reported briefly.
  *
  * TODO(next stages): feed CRM data and existing client layouts into the
- *  client-data section of the prompt; hold the flush while the contact has
- *  the "typing…" status (+5 s after it stops) once the LiteAPI exposes it.
+ *  client-data section of the prompt.
  */
 object ViberAnalysis {
     private const val TAG = "GuardViberAn"
@@ -34,6 +33,12 @@ object ViberAnalysis {
     private const val MAX_WAIT_MS = 180_000L    // hard ceiling since the first msg
     private const val MAX_BATCH = 12            // flush immediately past this
     private const val TAIL = 15                 // context messages from /messages
+    // While the contact is typing (Viber api v24 exposes a ~6 s window in
+    // /chats) the flush is postponed and re-checked every TYPE_HOLD_MS —
+    // so the analysis always sees the finished thought. The hold itself is
+    // capped: past MAX_HOLD_MS since the first message we flush regardless.
+    private const val TYPE_HOLD_MS = 8_000L
+    private const val MAX_HOLD_MS = 300_000L
 
     private class Buf(val firstTs: Long) {
         val msgs = ArrayList<ViberApi.Event>()
@@ -78,6 +83,15 @@ object ViberAnalysis {
         synchronized(bufs) {
             val b = bufs[chatId] ?: return
             if (b.msgs.size != gen) return
+            // Hold while the contact is typing (unless the hold cap expired).
+            val holdExpired = System.currentTimeMillis() - b.firstTs >= MAX_HOLD_MS
+            if (!holdExpired && isTyping(ctx, chatId)) {
+                b.task?.cancel(false)
+                b.task = scheduler.schedule({ flushIfCurrent(ctx, chatId, gen) },
+                    TYPE_HOLD_MS, TimeUnit.MILLISECONDS)
+                Log.i(TAG, "chat $chatId is typing — holding flush")
+                return
+            }
             batch = ArrayList(b.msgs)
             b.msgs.clear()
             b.task = null
@@ -88,6 +102,10 @@ object ViberAnalysis {
             Log.w(TAG, "analyze failed: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
+
+    /** True when the peer of `chatId` typed within the last few seconds. */
+    private fun isTyping(ctx: Context, chatId: Long): Boolean =
+        ViberApi.chats(ctx).firstOrNull { it.chatId == chatId }?.typing == true
 
     private const val SYS_PROMPT = """Ты — помощник владельца рекламного агентства. Он не читает
 переписку целиком — ты делаешь первичный разбор новых входящих сообщений клиентов в Viber.
